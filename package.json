@@ -1,0 +1,25 @@
+{
+  "name": "bis-saathi",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Source-grounded bilingual assistant for Indian Standards and BIS services.",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "install:all": "npm --prefix mock-api install && npm --prefix frontend install",
+    "dev": "npm run dev --prefix mock-api",
+    "dev:mock": "npm run dev --prefix mock-api",
+    "dev:web": "npm run dev --prefix frontend",
+    "build": "npm run build --prefix frontend",
+    "start": "npm run start --prefix mock-api",
+    "test": "npm run test:mock && npm run test:web",
+    "test:mock": "npm test --prefix mock-api",
+    "test:web": "npm test --prefix frontend",
+    "test:a11y": "npm run test:a11y --prefix frontend",
+    "typecheck": "npm run typecheck --prefix mock-api && npm run typecheck --prefix frontend",
+    "verify": "npm run typecheck && npm test && npm run contrast && npm run build",
+    "contrast": "npm run contrast --prefix frontend"
+  }
+}

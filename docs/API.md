@@ -42,7 +42,7 @@ Base path: `/api/v1`. JSON bodies. UTF-8. All timestamps ISO-8601 UTC (`2026-10-
 | 409 | `CONFLICT` | e.g. email already registered |
 | 413 | `PAYLOAD_TOO_LARGE` | upload over `UPLOAD_MAX_BYTES` |
 | 415 | `UNSUPPORTED_MEDIA_TYPE` | upload extension/MIME/magic bytes not allowed |
-| 422 | `OUT_OF_SCOPE` | question outside BIS domain (§6 #7) |
+| 422 | `OUT_OF_SCOPE` | **Reserved for P2 — not returned by any endpoint today.** An out-of-scope question is a *successful* answer about scope: `POST /conversations/{id}/messages` streams 200 with `intent: "out_of_scope"` in the `meta` frame and a refusal sentence in `delta`. A 422 would tell a client to repair its request, and would have to abort an SSE stream that has already sent its status line. |
 | 423 | `ACCOUNT_LOCKED` | too many failed logins |
 | 429 | `RATE_LIMITED` | includes `Retry-After` header |
 | 500 | `INTERNAL_ERROR` | generic; real cause goes to logs only |
@@ -64,7 +64,8 @@ Rate-limited and locked responses include `Retry-After: <seconds>`.
 | POST | `/auth/login` | `{email, password}` → 200 `{user, accessToken}` + cookies |
 | POST | `/auth/refresh` | cookie in → new rotating cookie + `{accessToken}`; replay ⇒ 401 `REFRESH_REUSED` + family revoked |
 | POST | `/auth/logout` | revokes current token family, clears cookies → 204 |
-| POST | `/auth/password/reset-request` | `{email}` → 202 **always**, same body whether or not the account exists (no enumeration) |
+| POST | `/auth/password/reset-request` | `{email}` → **202** `{accepted, message, devToken?}`, identical body whether or not the account exists (no enumeration). `devToken` appears only in development; a production deployment logs the miss instead of returning a credential over HTTP. |
+| POST | `/auth/password/change` | `{currentPassword, newPassword}` (auth module, not `/users/me/*`, because it consumes the credential) → 204 + refreshed cookies |
 | POST | `/auth/password/reset` | `{token, password}` → 204 |
 
 `/meta/bootstrap` response:
@@ -87,16 +88,15 @@ answer must never be able to pass for a grounded one).
 |---|---|---|
 | GET | `/users/me` | current profile |
 | PATCH | `/users/me` | `{fullName?, persona?, language?}` — never accepts `role` or `emailVerified` |
-| POST | `/users/me/password` | `{currentPassword, newPassword}` |
 | GET | `/conversations` | list, newest first, **scoped to caller** |
 | POST | `/conversations` | `{title?}` → 201 |
 | GET | `/conversations/{id}` | 404 if not owned by caller (R9) |
 | PATCH | `/conversations/{id}` | rename `{title}` |
-| DELETE | `/conversations/{id}`` | 204 |
+| DELETE | `/conversations/{id}` | 204 |
 | GET | `/conversations/{id}/messages` | paged |
 | POST | `/conversations/{id}/messages` | **SSE stream**, see below |
 
-### Admin (P1 stub, full build in P4/P5)
+### Admin (read-only in P1; write actions arrive with ingestion in P2)
 
 | Method | Path | Min role |
 |---|---|---|
@@ -110,7 +110,7 @@ answer must never be able to pass for a grounded one).
 
 ```
 event: meta
-data: {"messageId":"...","intent":"factual","language":"en","retrievalMs":12}
+data: {"messageId":"...","intent":"factual","language":"en","retrievalMs":12,"piiDetected":false,"inScope":true}
 
 event: delta
 data: {"text":"From sources"}
@@ -128,6 +128,12 @@ event: error
 data: {"code":"PROVIDER_UNAVAILABLE","message":"..."}
 ```
 
+`piiDetected` is `true` when the server found and **redacted** personal data (Aadhaar-like
+digit runs, PAN, Indian mobile numbers, e-mail addresses, a pasted JWT) in the question. The
+stored user turn holds the redacted text, never the raw text, so the flag is also the client's
+cue to say so — the redaction is never silent. `inScope` is `false` exactly when `intent` is
+`out_of_scope`.
+
 Rules: `sources` is emitted **after** server-side citation validation (R3) and only ever contains rows
 from the database — the model never supplies titles or URLs. `error` is terminal and must be surfaced
 (R8). With an empty knowledge base every answer is the exact R4 sentence with `evidenceTier: "NONE"`;
@@ -138,7 +144,7 @@ that is correct behaviour, not a stub.
 | Field | Rule |
 |---|---|
 | `email` | RFC-5322-ish, ≤254 chars, lowercased on write |
-| `password` | ≥10 chars, ≤200, must contain a letter and a digit; never logged; never returned |
+| `password` | ≥10 chars, ≤200, must contain at least one **letter** and one **digit**, where both are Unicode categories (`\p{L}` / `\p{N}`, i.e. Java `Character.isLetter`/`isDigit`) — a Devanagari passphrase is valid; never logged; never returned |
 | `fullName` | 1–120 chars, control chars stripped |
 | `message.content` | 1–4000 chars |
 | `conversation.title` | ≤160 chars |

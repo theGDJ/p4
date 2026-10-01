@@ -57,8 +57,11 @@ export function createApp(store: Store = db()): Express {
         // Same-origin/curl requests have no Origin header and must be allowed.
         if (!origin) return callback(null, true);
         if (c.CORS_ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+        // Deny by omitting the ACAO header — the browser then blocks the response.
+        // Throwing here would turn a CORS mismatch into a 500, which is both a
+        // worse failure mode and an information leak about server internals.
         logger.warn('CORS rejection', { origin });
-        return callback(new Error(`Origin ${origin} is not allowed by CORS policy.`));
+        return callback(null, false);
       },
       credentials: true,
       methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],

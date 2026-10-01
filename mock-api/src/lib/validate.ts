@@ -21,8 +21,11 @@ export const passwordSchema = z
   .string()
   .min(10, 'Use at least 10 characters.')
   .max(200, 'Password is too long.')
-  .refine((v) => /[A-Za-z]/.test(v), 'Include at least one letter.')
-  .refine((v) => /\d/.test(v), 'Include at least one digit.');
+  // Unicode property classes, not [A-Za-z] / \d: the backend checks
+  // Character.isLetter / isDigit, and an ASCII-only class would reject a legal
+  // Devanagari passphrase here while accepting it there. `u` is required for \p{...}.
+  .refine((v) => /\p{L}/u.test(v), 'Include at least one letter.')
+  .refine((v) => /\p{N}/u.test(v), 'Include at least one digit.');
 
 export const fullNameSchema = z
   .string()

@@ -21,7 +21,6 @@ const Schema = z.object({
   // Secrets. In test we accept the built-in dev defaults so suites run without a .env;
   // in production an absent secret is a fatal boot error.
   JWT_ACCESS_SECRET: z.string().min(32).default('dev-only-access-secret-change-me-32bytes!'),
-  JWT_REFRESH_SECRET: z.string().min(32).default('dev-only-refresh-secret-change-me-32bytes!'),
   JWT_ACCESS_TTL_MINUTES: z.coerce.number().int().positive().default(15),
   JWT_REFRESH_TTL_DAYS: z.coerce.number().int().positive().default(14),
 
@@ -76,7 +75,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   if (isProduction) {
     const offenders: string[] = [];
     if (c.JWT_ACCESS_SECRET.startsWith('dev-only')) offenders.push('JWT_ACCESS_SECRET');
-    if (c.JWT_REFRESH_SECRET.startsWith('dev-only')) offenders.push('JWT_REFRESH_SECRET');
     if (c.CORS_ALLOWED_ORIGINS.some((o) => o.includes('*'))) offenders.push('CORS_ALLOWED_ORIGINS');
     if (!c.COOKIE_SECURE) offenders.push('COOKIE_SECURE');
     if (offenders.length > 0) {

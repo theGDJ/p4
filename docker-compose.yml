@@ -1,13 +1,17 @@
 # BIS-Saathi — local development stack
 #
-#   cp .env.example .env      # then edit the two REQUIRED secrets
-#   docker compose up --build
+#   cp .env.example .env      # then edit the required secrets
+#   docker compose up --build                       # frontend + Spring Boot + pg + redis
+#   docker compose --profile mock up frontend mock-api   # frontend + Node mock API only
 #
-# Services: frontend (Vite) -> backend (Spring Boot) -> postgres (pgvector) + redis.
+# Services: frontend (nginx serving the Vite build, proxying /api/v1) -> backend
+# (Spring Boot) -> postgres (pgvector) + redis. The `mock` profile swaps the JVM
+# backend for the Node mock API that implements the same docs/API.md contract; use it
+# when there is no JDK, or to exercise the frontend alone.
 #
 # NOTE: this file is authored but could NOT be executed in the build sandbox
-# (no Docker daemon, no JDK). See docs/ENVIRONMENT.md. To run the same stack
-# without Docker/JDK use the Node mock API instead:  npm run dev:mock
+# (no Docker daemon, no JDK). See docs/ENVIRONMENT.md. The same stack without
+# Docker/JDK is available as an npm script:  npm run dev:mock
 name: bis-saathi
 
 x-logging: &default-logging
@@ -79,7 +83,6 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?set JWT_ACCESS_SECRET in .env}
-      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?set JWT_REFRESH_SECRET in .env}
       JWT_ACCESS_TTL_MINUTES: ${JWT_ACCESS_TTL_MINUTES:-15}
       JWT_REFRESH_TTL_DAYS: ${JWT_REFRESH_TTL_DAYS:-14}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
@@ -95,6 +98,18 @@ services:
       - "${PORT_BACKEND:-8080}:8080"
     volumes:
       - uploads:/app/uploads
+    # Readiness, not liveness: /api/v1/health/live answers as soon as the socket is
+    # up, which would mark the container healthy before Flyway has finished and let
+    # the frontend proxy a 502 as an application error.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "curl -fsS http://127.0.0.1:8080/api/v1/health/ready >/dev/null || exit 1"
+      interval: 15s
+      timeout: 3s
+      # A cold Boot context plus a first migration is the slowest thing here.
+      start_period: 90s
+      retries: 5
     logging: *default-logging
 
   frontend:
@@ -105,12 +120,23 @@ services:
     container_name: bissaathi-frontend
     restart: unless-stopped
     depends_on:
-      - backend
+      # `required: false` lets `docker compose --profile mock up frontend mock-api`
+      # start without building backend/ at all. When backend IS part of the run, the
+      # health gate still applies, so the frontend never proxies a starting JVM.
+      backend:
+        condition: service_healthy
+        required: false
     environment:
-      # Consumed at container start by the nginx entrypoint, not at build time.
+      # Rendered into the nginx config at container start by the stock
+      # /etc/nginx/templates entrypoint — never baked into the image, so one image
+      # serves any host/port combination.
       API_BASE_PATH: ${API_BASE_PATH:-/api/v1}
+      UPSTREAM_HOST: backend
+      UPSTREAM_PORT: 8080
     ports:
-      - "${PORT_FRONTEND:-5173}:80"
+      # The frontend image listens on 8080 so it needs no privileged port and no
+      # root; the host-side mapping is what a browser actually sees.
+      - "${PORT_FRONTEND:-5173}:8080"
     logging: *default-logging
 
   # Optional: the Node mock API, so the frontend can be exercised without the JVM.
@@ -127,11 +153,18 @@ services:
       PORT: ${PORT_MOCK_API:-8081}
       APP_ENV: ${APP_ENV:-development}
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?set JWT_ACCESS_SECRET in .env}
-      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-}
       COOKIE_SECURE: "false"
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
     ports:
       - "${PORT_MOCK_API:-8081}:8081"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "wget -q -O /dev/null http://127.0.0.1:8081/api/v1/health/live || exit 1"
+      interval: 15s
+      timeout: 3s
+      start_period: 15s
+      retries: 5
     logging: *default-logging
 
 volumes:

@@ -15,7 +15,6 @@ export default defineConfig({
       LOG_LEVEL: 'silent',
       LOG_PII_REDACTION: 'true',
       JWT_ACCESS_SECRET: 'test-access-secret-value-that-is-long-enough-32',
-      JWT_REFRESH_SECRET: 'test-refresh-secret-value-that-is-long-enough-32',
       // Small windows so lockout and rate-limit behaviour is observable quickly.
       LOGIN_MAX_FAILED_ATTEMPTS: '5',
       LOGIN_LOCKOUT_MINUTES: '15',
