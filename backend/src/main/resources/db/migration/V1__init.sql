@@ -166,14 +166,21 @@ CREATE TABLE messages (
   sources_json     jsonb        NOT NULL DEFAULT '[]'::jsonb,
   evidence_tier    varchar(8)   NOT NULL DEFAULT 'NONE'
                    CONSTRAINT messages_tier_known CHECK (evidence_tier IN ('STRONG', 'PARTIAL', 'NONE')),
+  -- The classifier's own vocabulary, kept identical to INTENTS in the API contract:
+  -- a row that says 'hallmark' would never match a query for 'hallmarking', and the
+  -- CHECK is what turns that drift into a rejected write instead of silent bad data.
   intent           varchar(24)
                    CONSTRAINT messages_intent_known CHECK (intent IS NULL OR intent IN
-                     ('factual', 'clarify', 'recommend', 'certification', 'hallmark',
-                      'lab', 'compare', 'chitchat', 'out_of_scope', 'meta')),
+                     ('chitchat', 'meta', 'factual', 'recommend', 'certification',
+                      'hallmarking', 'lab', 'clarify', 'out_of_scope')),
   language         varchar(8)   NOT NULL DEFAULT 'en'
                    CONSTRAINT messages_language_known CHECK (language IN ('en', 'hi')),
   prompt_tokens    integer      NOT NULL DEFAULT 0,
   completion_tokens integer     NOT NULL DEFAULT 0,
+  -- NULL means "this deployment has not configured pricing", which the UI renders as
+  -- no cost rather than as free (R10). numeric, not real: a float would let a per-token
+  -- rate accumulate rounding drift across a month of invoices.
+  cost_usd         numeric(10,6),
   model            varchar(64),
   cache_hit        boolean      NOT NULL DEFAULT false,
   retrieval_ms     integer,
@@ -286,10 +293,20 @@ CREATE TABLE document_sources (
   -- R11: copyright status is recorded at ingestion time, not inferred later.
   copyright_status   varchar(24)  NOT NULL DEFAULT 'UNKNOWN'
                      CONSTRAINT ds_copyright_known CHECK (copyright_status IN
-                       ('PUBLIC', 'GOVERNMENT', 'LICENSED', 'RESTRICTED', 'UNKNOWN'))
+                       ('PUBLIC', 'GOVERNMENT', 'LICENSED', 'RESTRICTED', 'UNKNOWN')),
+  -- Freshness monitor (§6 #13). NULL until the first check; a source with no URL has
+  -- nothing to re-check and is reported as such rather than as a failure.
+  last_checked_at    timestamptz,
+  last_check_outcome varchar(16)
+                     CONSTRAINT ds_freshness_outcome_known CHECK (last_check_outcome IS NULL OR last_check_outcome IN
+                       ('UNCHANGED', 'CHANGED', 'LINK_ROT', 'ERROR')),
+  last_check_detail  text
 );
 
 CREATE INDEX ds_version_idx ON document_sources (document_version_id);
+-- The sweep's work list: what is due to be re-checked, oldest check first.
+CREATE INDEX ds_due_check_idx ON document_sources (last_checked_at NULLS FIRST)
+  WHERE url IS NOT NULL AND checksum IS NOT NULL;
 
 -- The retrieval unit. A chunk is retrievable only when review_state = 'APPROVED'
 -- and verification_status <> 'SUPERSEDED' (R7). Restricted documents produce no
@@ -353,27 +370,68 @@ CREATE INDEX kc_retrievable_idx ON knowledge_chunks (document_id, review_state, 
 CREATE INDEX kc_language_idx   ON knowledge_chunks (language, review_state);
 CREATE INDEX kc_standard_no_idx ON knowledge_chunks (standard_no);
 
+-- The knowledge-base revision. One row, bumped by every approval and every rejection:
+-- it is what invalidates the answer cache and what `kbVersion` in the SSE `usage` frame
+-- reports, so a cached answer can be proven to pre-date a correction. Kept in the
+-- database rather than in process memory because a restarted server must not serve
+-- yesterday's cache as if nothing had changed.
+CREATE TABLE app_state (
+  id          smallint     PRIMARY KEY DEFAULT 1 CONSTRAINT app_state_singleton CHECK (id = 1),
+  kb_version  bigint       NOT NULL DEFAULT 0 CONSTRAINT app_state_kb_non_negative CHECK (kb_version >= 0),
+  updated_at  timestamptz  NOT NULL DEFAULT now()
+);
+
+INSERT INTO app_state (id, kb_version) VALUES (1, 0);
+
 CREATE TABLE ingestion_jobs (
   id               uuid         PRIMARY KEY DEFAULT gen_random_uuid(),
   document_id      uuid         REFERENCES knowledge_documents (id) ON DELETE SET NULL,
-  source_kind      varchar(32)  NOT NULL DEFAULT 'url',
-  state            varchar(16)  NOT NULL DEFAULT 'PENDING'
-                   CONSTRAINT ij_state_known CHECK (state IN ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED')),
-  stage            varchar(32)  NOT NULL DEFAULT 'QUEUED',
+  -- The version this job produced. Kept separate from document_id so a monitor can show
+  -- "v3 is pending review" while v2 stays live and searchable (R2).
+  document_version_id uuid      REFERENCES document_versions (id) ON DELETE SET NULL,
+  source_kind      varchar(32)  NOT NULL DEFAULT 'url'
+                   CONSTRAINT ij_kind_known CHECK (source_kind IN ('url', 'upload', 'manifest', 'manual')),
+  -- URL or filename for the monitor; NULL for pasted text, which has no source to link.
+  source_label     text,
+  -- The four states the API returns. `DONE`, not `SUCCEEDED`: one vocabulary in the
+  -- schema, the code and docs/API.md, because a monitor that has to translate states
+  -- is where "FAILED" gets rendered as green.
+  state            varchar(16)  NOT NULL DEFAULT 'QUEUED'
+                   CONSTRAINT ij_state_known CHECK (state IN ('QUEUED', 'RUNNING', 'DONE', 'FAILED')),
+  stage            varchar(32)  NOT NULL DEFAULT 'QUEUED'
+                   CONSTRAINT ij_stage_known CHECK (stage IN
+                     ('QUEUED', 'FETCH', 'EXTRACT', 'CLEAN', 'CHUNK', 'EMBED', 'PERSIST', 'DONE')),
   -- R8: the failure reason is kept and surfaced through /admin/ingestion/jobs.
   error            text,
+  -- Non-fatal findings (OCR required, injection-like strings, dropped pages). Surfaced
+  -- in the job payload rather than swallowed, but they never fail a job.
+  warnings         jsonb        NOT NULL DEFAULT '[]'::jsonb,
   attempts         smallint     NOT NULL DEFAULT 0,
+  max_attempts     smallint     NOT NULL DEFAULT 3,
+  -- Retry backoff: NULL (or in the past) means the worker may take this job now.
+  next_attempt_at  timestamptz,
   chunks_produced  integer      NOT NULL DEFAULT 0,
   requested_by     uuid         REFERENCES users (id) ON DELETE SET NULL,
+  -- The request minus any pasted or uploaded payload: enough to re-run from the URL
+  -- without a client round-trip. needs_resubmit says when that is not possible.
+  spec             jsonb,
+  needs_resubmit   boolean      NOT NULL DEFAULT false,
   started_at       timestamptz,
   finished_at      timestamptz,
   created_at       timestamptz  NOT NULL DEFAULT now(),
   updated_at       timestamptz  NOT NULL DEFAULT now(),
-  CONSTRAINT ij_finished_after_started CHECK (started_at IS NULL OR finished_at IS NULL OR finished_at >= started_at)
+  CONSTRAINT ij_finished_after_started CHECK (started_at IS NULL OR finished_at IS NULL OR finished_at >= started_at),
+  CONSTRAINT ij_max_attempts_positive CHECK (max_attempts > 0),
+  -- A failed job is the only one that may wait for a retry, and it must say why.
+  CONSTRAINT ij_failure_recorded CHECK (state <> 'FAILED' OR error IS NOT NULL)
 );
 
 CREATE INDEX ij_state_idx    ON ingestion_jobs (state, created_at DESC);
 CREATE INDEX ij_document_idx ON ingestion_jobs (document_id);
+-- What the worker polls: due retries, oldest first. Partial, so a queue full of
+-- finished jobs does not grow the hot path.
+CREATE INDEX ij_due_retry_idx ON ingestion_jobs (next_attempt_at)
+  WHERE state IN ('QUEUED', 'FAILED');
 
 -- =============================================================================
 -- 4. DOMAIN REFERENCE DATA (features #6, #7, #8)
@@ -517,7 +575,10 @@ CREATE TABLE feedback (
                    ('WRONG_ANSWER', 'MISSING_SOURCE', 'STALE_SOURCE', 'LANGUAGE', 'OTHER')),
   resolved       boolean      NOT NULL DEFAULT false,
   created_at     timestamptz  NOT NULL DEFAULT now(),
-  updated_at     timestamptz  NOT NULL DEFAULT now()
+  updated_at     timestamptz  NOT NULL DEFAULT now(),
+  -- One verdict per user per message. The endpoint upserts rather than appending, so a
+  -- person who changes their mind edits their feedback instead of voting twice.
+  CONSTRAINT fb_user_message_unique UNIQUE (user_id, message_id)
 );
 
 CREATE INDEX feedback_message_idx ON feedback (message_id);

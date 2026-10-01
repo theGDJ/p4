@@ -1,5 +1,6 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { z } from 'zod';
+import { DOC_TYPES } from '../constants';
 import { badRequest } from './errors';
 
 /**
@@ -87,6 +88,163 @@ export const sendMessageSchema = z.object({
     .pipe(z.string().trim().min(1, 'Type a question.').max(4000, 'Questions are limited to 4000 characters.')),
   language: languageSchema.optional(),
 });
+
+/* --------------------------------------------------- P2: knowledge admin */
+
+/** §5/§7 controlled vocabulary — a free-text doc_type would make the retrieval filter unenforceable. */
+export const docTypeSchema = z.enum(DOC_TYPES);
+export const copyrightSchema = z.enum(['PUBLIC', 'GOVERNMENT', 'LICENSED', 'RESTRICTED', 'UNKNOWN']);
+
+/**
+ * A standard number must contain a digit. That is not a style rule: a row whose
+ * `standard_no` is prose would put a fabricated identifier in front of a user as
+ * if it were a citation (R10).
+ */
+const standardNoSchema = z
+  .string()
+  .transform(stripControlChars)
+  .pipe(
+    z
+      .string()
+      .trim()
+      .min(2, 'A standard number needs a digit, e.g. IS 10500:2012.')
+      .max(64)
+      .regex(/\d/, 'A standard number needs a digit, e.g. IS 10500:2012.'),
+  );
+
+const isoDateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD.')
+  .refine((v) => !Number.isNaN(Date.parse(`${v}T00:00:00Z`)), 'Not a real date.')
+  .refine((v) => Date.parse(`${v}T00:00:00Z`) <= Date.now(), 'A publication date cannot be in the future.');
+
+/** Shared descriptive metadata for every ingestion route. */
+const ingestMeta = {
+  title: z.string().transform(stripControlChars).pipe(z.string().trim().min(3, 'A title is required for a citation.').max(200)),
+  docType: docTypeSchema.default('STANDARD'),
+  language: languageSchema.default('en'),
+  standardNo: standardNoSchema.optional(),
+  publisher: z.string().transform(stripControlChars).pipe(z.string().trim().max(255)).optional(),
+  licenseNote: z.string().transform(stripControlChars).pipe(z.string().trim().max(1000)).optional(),
+  copyrightStatus: copyrightSchema.optional(),
+  accessLevel: z.enum(['open', 'restricted']).default('open'),
+  publishedDate: isoDateSchema.optional(),
+  revisedDate: isoDateSchema.optional(),
+  documentId: z.uuid().optional(),
+  /**
+   * Admit text that the injection detector flagged. The flags stay recorded on every
+   * chunk and remain visible to the reviewer, so this only lets text reach the review
+   * queue — it never publishes anything, and it never rewrites the text (R4/R7).
+   */
+  overrideInjectionFlags: z.boolean().default(false),
+  /**
+   * Re-ingest even when an existing version has the identical content hash. Without it
+   * a duplicate is a DONE job with zero chunks and an "unchanged" warning, which is the
+   * right answer most of the time (R2: a re-ingest must not rewrite frozen evidence).
+   */
+  force: z.boolean().default(false),
+};
+
+/**
+ * `.refine` rather than a second schema: the pair is only reachable through these
+ * routes, and the error message can then name the actual conflict.
+ */
+function requireLicenceForRestricted<T extends { accessLevel: string; licenseNote?: string | undefined }>(value: T): boolean {
+  return value.accessLevel !== 'restricted' || (value.licenseNote?.trim().length ?? 0) > 0;
+}
+
+export const ingestUrlSchema = z
+  .object({
+    url: z.url({ error: 'A full http(s) URL is required. Never invent one (see knowledge/README.md).' }).max(2048),
+    ...ingestMeta,
+  })
+  .strict()
+  .refine(requireLicenceForRestricted, {
+    path: ['licenseNote'],
+    message: 'A restricted source must state its licence terms before it can be recorded (R11).',
+  });
+
+export const ingestTextSchema = z
+  .object({
+    content: z
+      .string()
+      .transform(stripControlChars)
+      .pipe(z.string().trim().min(40, 'Paste at least a paragraph; a fragment is not a knowledge source.')),
+    ...ingestMeta,
+  })
+  .strict()
+  .refine(requireLicenceForRestricted, {
+    path: ['licenseNote'],
+    message: 'A restricted source must state its licence terms before it can be recorded (R11).',
+  });
+
+export const ingestUploadSchema = z
+  .object({
+    filename: z
+      .string()
+      .trim()
+      .min(3)
+      .max(200)
+      .regex(/^[^/\\\u0000-\u001F]+\.(pdf|txt|md|markdown|html?|csv)$/i, 'Allowed types: .pdf, .html, .txt, .md, .csv.'),
+    contentBase64: z
+      .string()
+      .min(16, 'The file body is empty.')
+      .regex(/^[A-Za-z0-9+/=\s]+$/, 'The file must be base64.'),
+    ...ingestMeta,
+  })
+  .strict()
+  .refine(requireLicenceForRestricted, {
+    path: ['licenseNote'],
+    message: 'A restricted source must state its licence terms before it can be recorded (R11).',
+  });
+
+export const ingestManifestSchema = z
+  .object({
+    csv: z.string().min(20, 'The manifest is empty.').max(400_000, 'Split the manifest into smaller files.'),
+    /** Rows already marked `approved` are auto-approved by the submitting manager. */
+    honorApprovedStatus: z.boolean().default(true),
+  })
+  .strict();
+
+export const reviewChunkSchema = z
+  .object({
+    note: z.string().transform(stripControlChars).pipe(z.string().trim().max(500)).optional(),
+  })
+  .strict();
+
+export const listDocumentsQuery = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+    offset: z.coerce.number().int().min(0).default(0),
+    reviewState: z.enum(['PENDING_REVIEW', 'APPROVED', 'REJECTED', 'ALL']).default('ALL'),
+  })
+  .strict();
+
+export const listChunksQuery = z
+  .object({
+    documentId: z.uuid().optional(),
+    versionId: z.uuid().optional(),
+    reviewState: z.enum(['PENDING_REVIEW', 'APPROVED', 'REJECTED', 'ALL']).default('ALL'),
+    limit: z.coerce.number().int().min(1).max(100).default(25),
+    offset: z.coerce.number().int().min(0).default(0),
+  })
+  .strict();
+
+export const recordFeedbackSchema = z
+  .object({
+    helpful: z.boolean().optional(),
+    rating: z.coerce.number().int().min(1).max(5).optional(),
+    issueType: z.enum(['WRONG_ANSWER', 'MISSING_SOURCE', 'STALE_SOURCE', 'LANGUAGE', 'OTHER']).optional(),
+    comment: z
+      .string()
+      .transform(stripControlChars)
+      .pipe(z.string().trim().max(1000))
+      .optional(),
+  })
+  .strict()
+  .refine((v) => v.helpful !== undefined || v.rating !== undefined || v.issueType !== undefined || v.comment !== undefined, {
+    message: 'Nothing to record.',
+  });
 
 type AnyZod = z.ZodType<unknown>;
 

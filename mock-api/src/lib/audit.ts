@@ -62,5 +62,16 @@ export const AUDIT_ACTIONS = {
   ADMIN_ACCESS_DENIED: 'admin.access.denied',
   USER_PROFILE_UPDATED: 'user.profile.updated',
   CONVERSATION_DELETED: 'conversation.deleted',
+  // P2 — knowledge administration (feature #4) and the monitors built on it.
+  KNOWLEDGE_INGEST_REQUESTED: 'knowledge.ingest.requested',
+  KNOWLEDGE_JOB_RETRY: 'knowledge.job.retry',
+  KNOWLEDGE_CHUNK_APPROVED: 'knowledge.chunk.approved',
+  KNOWLEDGE_VERSION_APPROVED: 'knowledge.version.approved',
+  KNOWLEDGE_VERSION_REJECTED: 'knowledge.version.rejected',
+  KNOWLEDGE_INGEST_THROTTLED: 'knowledge.ingest.throttled',
+  KNOWLEDGE_CHUNK_REJECTED: 'knowledge.chunk.rejected',
+  KNOWLEDGE_FRESHNESS_CHECK: 'knowledge.freshness.check',
+  FEEDBACK_RECORDED: 'feedback.recorded',
+  MAIL_SEND_FAILED: 'mail.send.failed',
 } as const;
 

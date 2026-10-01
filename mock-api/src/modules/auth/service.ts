@@ -19,7 +19,17 @@ import {
   badRequest,
 } from '../../lib/errors';
 import { hashPassword, needsRehash, verifyPassword } from '../../lib/password';
-import { hashRefreshToken, issueRefreshToken, issueResetToken, newFamilyId, signAccessToken } from '../../lib/tokens';
+import { getMailer, passwordResetMail } from '../../lib/mail';
+import {
+  RESET_TOKEN_TTL_MINUTES,
+  hashRefreshToken,
+  issueRefreshToken,
+  issueResetToken,
+  newFamilyId,
+  signAccessToken,
+} from '../../lib/tokens';
+import { AUDIT_ACTIONS, recordAudit } from '../../lib/audit';
+import { serviceUnavailable } from '../../lib/errors';
 import { logger } from '../../lib/logger';
 
 /**
@@ -263,10 +273,31 @@ export function logoutEverywhere(store: Store, userId: string): number {
  * returned as `devToken` so the flow can be exercised without an email provider;
  * that field is never present when NODE_ENV=production.
  */
-export function requestPasswordReset(
+/**
+ * Requests a password reset.
+ *
+ * Mail is attempted for real (§6/§8): the reset token is single-use, hashed at
+ * rest, and the link is absolute only when `APP_PUBLIC_URL` is configured — never
+ * built from a `Host` header, which would let an attacker point the link at their
+ * own domain.
+ *
+ * The trade-off this function makes on purpose: a per-recipient SMTP failure is
+ * logged, audited and counted, but the response stays the same generic 202. A
+ * response that differed when a mailbox rejected the mail would tell an attacker the
+ * address has an account — the same enumeration the "incorrect email or password"
+ * message exists to prevent.
+ */
+export async function requestPasswordReset(
   store: Store,
   email: string,
-): { accepted: true; devToken?: string } {
+): Promise<{ accepted: true; devToken?: string }> {
+  const c0 = config();
+  const mailer = getMailer();
+  if (c0.isProduction && !mailer.canDeliver) {
+    // Checked before the user lookup so this failure mode is not an oracle either.
+    throw serviceUnavailable('Password reset by email is temporarily unavailable. Please try again later.');
+  }
+
   const user = users.byEmail(store, email.trim().toLowerCase());
   if (!user) return { accepted: true };
 
@@ -284,14 +315,43 @@ export function requestPasswordReset(
   passwordResets.put(store, row);
 
   const c = config();
-  if (c.NODE_ENV === 'production') {
-    // In production this goes to the email provider; nothing is returned or logged.
-    return { accepted: true };
+  if (mailer.canDeliver) {
+    try {
+      const mail = passwordResetMail({
+        language: user.language,
+        token: issued.rawToken,
+        expiresMinutes: RESET_TOKEN_TTL_MINUTES,
+        name: user.fullName,
+      });
+      await mailer.send({ ...mail, to: user.email });
+    } catch (err) {
+      mailFailures += 1;
+      logger.error('password reset mail could not be delivered', { userId: user.id, err });
+      recordAudit(store, {
+        actorUserId: user.id,
+        action: AUDIT_ACTIONS.MAIL_SEND_FAILED,
+        entityType: 'user',
+        entityId: user.id,
+        outcome: 'FAILURE',
+        metadata: { reason: 'smtp' },
+      });
+      // The response is unchanged on purpose (enumeration), the failure is not hidden.
+    }
   }
-  logger.warn('dev-only password reset token issued (email delivery is not configured)', {
-    userId: user.id,
-  });
+
+  if (c.NODE_ENV === 'production') return { accepted: true };
+
+  if (!mailer.canDeliver) {
+    logger.warn('dev-only password reset token printed because no SMTP transport is configured', {
+      userId: user.id,
+    });
+  }
   return { accepted: true, devToken: issued.rawToken };
+}
+
+let mailFailures = 0;
+export function passwordResetMailFailures(): number {
+  return mailFailures;
 }
 
 export async function resetPassword(store: Store, token: string, newPassword: string): Promise<void> {

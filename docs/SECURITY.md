@@ -217,6 +217,25 @@ even with no database available).
 | Provider failure surfaces (R8) | `rag.test.ts`, `AnswerServiceTest.mockProviderFailsLoudly` | ✅ both |
 | Frontend guards + axe WCAG 2.2 AA | `protected-route.test.tsx`, `a11y.test.tsx` | ✅ |
 | Contrast ratios | `npm run contrast` (29 checks) | ✅ |
+| SSRF: literal IPs, redirects, ports, IPv6 forms | `ssrf.test.ts` (64) | ✅ (unit) |
+| `safeFetch` against a live server: size cap mid-stream, timeout, content type, non-2xx | `ssrf.test.ts` (12 of them) | ✅ |
+| Injection-like text flagged, not published; `overrideInjectionFlags` admits it to review only | `ingestion.test.ts` | ✅ |
+| Extract → clean → chunk → embed → PENDING_REVIEW per stage, backoff on failure | `ingestion-pipeline.test.ts` (15) | ✅ |
+| Nothing searchable without a human; reject also invalidates the cache | `knowledge-admin.test.ts`, `ingestion-pipeline.test.ts` | ✅ |
+| Restricted standard is metadata-only and never fetched (R11) | `ingestion-pipeline.test.ts`, `knowledge-admin.test.ts` | ✅ |
+| Vectors and raw content are not serialised by the list endpoints | `knowledge-admin.test.ts` | ✅ |
+| Manifest: refused / queued / deferred rows reported separately | `ingestion.test.ts`, `knowledge-admin.test.ts` | ✅ |
+| Freshness sweep flags CHANGED / LINK_ROT and never auto-re-ingests | `ingestion-pipeline.test.ts`, `knowledge-admin.test.ts` | ✅ |
+| Ingest submission throttle answers 429 + `Retry-After`, audited with the actor | `knowledge-admin.test.ts` | ✅ |
+| Answer cache: key carries kbVersion/language/intent; tier `NONE` never stored | `answer-cache-rewrite.test.ts` (28) | ✅ |
+| Rewrite cannot invent text: citations, delimiter escape, over-length, PII ⇒ refused | `answer-cache-rewrite.test.ts` | ✅ |
+| Provider: 429/5xx retried, 401/403 and malformed never; truncation reported | `providers.test.ts` (27) | ✅ |
+| Cost is `null` unless priced (R10) | `providers.test.ts`, `rag.test.ts` | ✅ |
+| Reset mail: transport state is what the API says it is (R8) | `auth.test.ts` | ✅ (mock) |
+
+Every ✅ above is a `mock-api` result. The P2 controls have **no executed backend twin yet**:
+the Java side has the same routes authored (uncompiled), and the rows marked ⚠ in the table
+above are expectations until `mvn verify` runs with Docker available.
 
 **⚠ = authored but never executed** (no JDK/Docker in the build sandbox). Those rows are
 *expectations*, not results, and the backend suite has to go green in an environment with
@@ -236,20 +255,28 @@ marketing.
    when a second verifier (a worker, a partner API) appears.
 3. **No token binding, no DPoP, no device attestation.** A token stolen from memory works until
    it expires. Mitigated by the 15-minute lifetime, not prevented.
-4. **Password reset delivery is unwired.** In development the token is returned so the flow can
-   be completed and tested; in production the request is logged and the token is *not* returned.
-   Until a mail provider exists, the flow cannot complete in production — which is a real gap,
-   not a fallback.
+4. **Password reset mail is wired in `mock-api`, not in `backend/`.** The Node app sends through
+   nodemailer when `MAIL_TRANSPORT=smtp`, prints the message when it is `log`, and states plainly
+   that nothing was sent when it is `none`; production refuses to boot on anything but `smtp`, so
+   a deployment cannot quietly promise a mail it will not deliver. The Spring side still has the
+   `log`-only service. In development the token is also returned in the response so the flow can be
+   completed without a mailbox — that is the one place a credential leaves the API over HTTP, and it
+   is gated on `NODE_ENV !== 'production'`.
 5. **No email verification in the login path** — `emailVerified` is stored and displayed but does
    not gate anything yet. It must not be used for authorisation until delivery exists.
-6. **Rate limiting is fixed-window**, so a burst at a window boundary can reach 2× the intended
-   ceiling. Accepted for P1 (the durable control is per-account lockout); sliding window or token
-   bucket is the P2 fix.
+6. **Auth rate limiting is fixed-window**, so a burst at a window boundary can reach 2× the intended
+   ceiling. Accepted (the durable control is per-account lockout, and the limiter fails *open* with a
+   WARN rather than locking users out when its own store hiccups). The P2 ingestion throttle is a
+   token bucket (burst 12, ~0.2 tokens/s refill) precisely because queueing work is a resource
+   commitment rather than a page view, and it answers 429 with `Retry-After` instead of 503.
 7. **`audit_logs` growth is unbounded**; no retention or purge job yet. Not confidentiality
    sensitive, but it is a disk- exhaustion path.
-8. **Ingestion approval is a manual state transition**, and nothing yet *enforces* that a chunk
-   was reviewed by a different human than the one who queued it. Self-approval must be blocked in
-   P2 with an approval-workflow test, not a policy document.
+8. **Self-approval is permitted.** `POST …/approve` records who reviewed a chunk and bumps
+   `kbVersion`, but nothing requires that person to be different from whoever queued the document.
+   The master spec asks only that "an admin approves" (§5), so a four-eyes rule would be a new
+   requirement rather than an implementation detail — it needs a decision, then a test, not a
+   policy paragraph. What *is* enforced: no text is retrievable before an approval, and a rejection
+   invalidates cached answers exactly like an approval does.
 9. **Prompt injection via document content is not fully mitigated.** The retrieved text is
    untrusted input that reaches the model. Defences today are structural: only post-validation
    text is emitted, sources are built from the database row rather than from model prose, and
@@ -258,3 +285,22 @@ marketing.
 10. **`/admin/*` responses expose counts and job errors** to CONTENT_MANAGER. Job `error` strings
     come from the ingestion layer and must be kept free of file paths and credentials as real
     sources are wired up; today they are safe because the mock generates them.
+
+11. **SSRF is mitigated to the extent the network allows, not eliminated.** What is enforced today:
+    scheme/credential/port-trailing-dot refusals, an allowlist of ports 80 and 443, every resolved
+    address screened at every hop and again after each redirect, the IPv6 forms that hide an IPv4
+    address (v4-mapped, 6to4, Teredo, NAT64 well-known prefix) unwrapped and screened, an
+    always-blocked set (loopback, unspecified, link-local incl. `169.254/16` and `fe80::/10`,
+    multicast, ULA) that stays blocked even with `INGEST_ALLOW_PRIVATE_NETWORKS=true`, the response
+    connected to the *pinned* IP with `rejectUnauthorized` still on, and a byte cap applied while
+    streaming rather than trusting `Content-Length`. Residual risks: a DNS zone that resolves
+    differently per query (the pin covers the connection we make, not one an attacker's TTL trick
+    could produce later, since we never re-resolve for the same request), a public host that
+    *redirects* to an internal name which then resolves publicly-side (re-screened, so this is
+    covered), and any service reachable on 80/443 from the egress path — e.g. a corporate
+    admin UI on a public hostname. That last class needs an egress allowlist (proxy or
+    `IP_TRANSPARENT` policy), not more parsing, and it is the reason `INGEST_*` refuses to start
+    in production with private networks permitted.
+12. **Error text from ingestion is deliberately uninformative about addresses.** A blocked URL is
+    reported as a policy refusal without the host or port, because the fetcher is a privileged
+    network position and an error that echoes "10.0.0.5:8080 refused" is a port scanner's output.

@@ -60,6 +60,16 @@ export const rateLimited = (retryAfterSeconds: number) =>
   });
 export const providerUnavailable = (message = 'The answer service is temporarily unavailable.') =>
   new AppError(502, ERROR_CODES.PROVIDER_UNAVAILABLE, message);
+/** 503: a dependency the request genuinely needs is down. Never used to hide a bug. */
+export const serviceUnavailable = (message = 'This function is temporarily unavailable.') =>
+  new AppError(503, ERROR_CODES.SERVICE_UNAVAILABLE, message);
+export const payloadTooLarge = (message = 'Request body is too large.') =>
+  new AppError(413, ERROR_CODES.PAYLOAD_TOO_LARGE, message);
+export const unsupportedMediaType = (message = 'That file type is not supported for ingestion.') =>
+  new AppError(415, ERROR_CODES.UNSUPPORTED_MEDIA_TYPE, message);
+/** The admin surface accepts a URL, which makes SSRF a real risk; a refused target is reported this way. */
+export const unsafeUrl = (message = 'That address cannot be fetched from this server.') =>
+  new AppError(400, ERROR_CODES.VALIDATION_FAILED, message);
 
 /** Short, non-secret correlation id surfaced as `traceRef` and in logs. */
 export function newTraceRef(): string {
