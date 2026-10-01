@@ -274,6 +274,17 @@ export function AdminPage() {
       <header>
         <h1 className="font-serif text-2xl font-semibold text-ink">{t('nav.admin')}</h1>
         <p className="mt-1 text-[13.5px] text-ink-muted">{t('admin.subtitle')}</p>
+
+      {/* One link to the write surface. The overview stays read-only so a manager
+          can look without touching anything; ingestion and approval live behind it. */}
+      <p className="mt-3">
+        <Link
+          to="/admin/knowledge"
+          className="inline-flex items-center gap-1.5 rounded-sm border border-line-strong bg-paper-raised px-2.5 py-1.5 text-[13px] font-semibold text-ink underline-offset-4 hover:underline"
+        >
+          {t('admin.openKnowledgeAdmin')}
+        </Link>
+      </p>
       </header>
 
       <div className="mt-6 space-y-4">
@@ -343,11 +354,13 @@ export function AdminPage() {
                 <ul className="divide-y divide-line">
                   {jobsQuery.data?.items.slice(0, 8).map((job) => (
                     <li key={job.id} className="flex flex-wrap items-center gap-2 py-2 text-[12.5px]">
-                      <Badge variant={job.state === 'SUCCEEDED' ? 'verified' : job.state === 'FAILED' ? 'error' : 'neutral'}>
+                      <Badge variant={job.state === 'DONE' ? 'verified' : job.state === 'FAILED' ? 'error' : 'neutral'}>
                         {job.state}
                       </Badge>
                       <span className="std-no text-ink-muted">{job.stage}</span>
-                      <span className="std-no ml-auto text-ink-faint">{formatRelative(job.updatedAt, i18n.language)}</span>
+                      <span className="std-no ml-auto text-ink-faint">
+                        {formatRelative(job.finishedAt ?? job.startedAt ?? job.createdAt, i18n.language)}
+                      </span>
                       {job.error ? <span className="w-full text-[11.5px] text-error">{job.error}</span> : null}
                     </li>
                   ))}

@@ -51,7 +51,10 @@ Base path: `/api/v1`. JSON bodies. UTF-8. All timestamps ISO-8601 UTC (`2026-10-
 
 Rate-limited and locked responses include `Retry-After: <seconds>`.
 
-## Endpoints implemented in P1
+## Implemented endpoints
+
+P1 covers auth, profile, conversations and the SSE answer stream. P2 adds ingestion, review, freshness, gaps, feedback,
+the answer cache and the provider budget fields.
 
 ### Public
 

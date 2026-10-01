@@ -9,7 +9,8 @@ import { App } from '@/App';
 import { LandingPage } from '@/pages/landing';
 import { LoginPage, RegisterPage, ForgotPasswordPage } from '@/pages/auth';
 import { NotFoundPage } from '@/pages/misc';
-import { anonymousRoutes, jsonResponse, mockFetch, resetSession, type FetchRoute } from './utils';
+import { AdminKnowledgePage } from '@/pages/admin-knowledge';
+import { anonymousRoutes, authenticatedRoutes, jsonResponse, makeUser, mockFetch, resetSession, type FetchRoute } from './utils';
 
 /**
  * Accessibility gate (§11: WCAG 2.2 AA).
@@ -86,6 +87,19 @@ describe('Accessibility (axe, WCAG 2.2 AA)', () => {
 
   it('forgot-password page has no violations', async () => {
     const results = await renderAndAudit(<ForgotPasswordPage />, '/forgot-password');
+    expect(results.violations, describeViolations(results)).toHaveLength(0);
+  });
+
+  it('knowledge admin (ingestion, review, jobs, freshness) has no violations', async () => {
+    const emptyList = (items: unknown[]) => jsonResponse(200, { items, total: items.length, pendingReview: 0, recheckable: 0, changed: 0, linkRot: 0, neverChecked: 0, queued: 0, failed: 0 });
+    const results = await renderAndAudit(<AdminKnowledgePage />, '/admin/knowledge', [
+      ...authenticatedRoutes(makeUser({ roles: ['USER', 'CONTENT_MANAGER'] })),
+      ['GET', /^\/admin\/knowledge\/chunks/, () => emptyList([])],
+      ['GET', /^\/admin\/ingestion\/jobs/, () => emptyList([])],
+      ['GET', /^\/admin\/knowledge\/sources\/freshness$/, () => emptyList([])],
+      ['GET', /^\/admin\/knowledge\/gaps$/, () => jsonResponse(200, { items: [], total: 0, note: 'A count of stored questions, not of demand.' })],
+      ['GET', /^\/admin\/feedback$/, () => jsonResponse(200, { items: [], total: 0, open: 0, note: 'Candidates for the golden evaluation set.' })],
+    ]);
     expect(results.violations, describeViolations(results)).toHaveLength(0);
   });
 

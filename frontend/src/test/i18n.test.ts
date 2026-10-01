@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { en } from '@/i18n/en';
 import { hi } from '@/i18n/hi';
@@ -10,6 +12,21 @@ import { hi } from '@/i18n/hi';
  * untranslated copy of the English, a `{{placeholder}}` that exists in one language
  * but not the other, and list-length drift at runtime.
  */
+
+/** Every non-test source file the UI can render from. */
+function sourceFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const path = join(dir, entry);
+    if (statSync(path).isDirectory()) {
+      if (entry === 'i18n' || entry === 'test') continue;
+      out.push(...sourceFiles(path));
+    } else if (/\.(tsx?|jsx?)$/.test(path)) {
+      out.push(path);
+    }
+  }
+  return out;
+}
 
 type Node = string | readonly unknown[] | { readonly [key: string]: Node };
 
@@ -127,9 +144,42 @@ describe('i18n parity (en ↔ hi)', () => {
   });
 
   it('contains no raw i18n keys as values', () => {
+    // Derived from the dictionary itself, so a newly added section cannot slip past
+    // this check the way a hand-maintained list of names would.
+    const prefixes = Object.keys(en).join('|');
+    const leaked = new RegExp(`^(${prefixes})\\.[A-Za-z0-9_.]+`);
     for (const key of enKeys) {
-      const value = at(key, hi);
-      if (typeof value === 'string') expect(value).not.toMatch(/^(common|nav|landing|auth|chat|citations|states|footer|dashboard|admin)\./);
+      for (const [language, root] of [['en', en], ['hi', hi]] as const) {
+        const value = at(key, root);
+        if (typeof value === 'string') expect(value, `${language}:${key}`).not.toMatch(leaked);
+      }
     }
+  });
+
+  it('has a translation for every key the components actually ask for', () => {
+    // The real failure mode of a typed dictionary: `t()` takes a string, so a key that
+    // no longer exists does not fail to compile — it renders the key itself to the user.
+    // Two admin headings did exactly that while this page was being built, and only a
+    // render test caught it. This makes the whole source tree the assertion.
+    const staticKey = /\bt\(\s*'([A-Za-z0-9_]+(?:\.[A-Za-z0-9_\[\]]+)+)'/g;
+    const dynamicPrefix = /\bt\(\s*`([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)\$\{/g;
+    const missing: string[] = [];
+    const used = new Set<string>();
+    for (const file of sourceFiles('src')) {
+      const text = readFileSync(file, 'utf8');
+      for (const match of text.matchAll(staticKey)) used.add(match[1] as string);
+      for (const match of text.matchAll(dynamicPrefix)) {
+        const prefix = match[1] as string;
+        const node = at(prefix, en);
+        if (node === undefined) missing.push(`${prefix}* (in ${file})`);
+      }
+    }
+    for (const key of used) {
+      if (at(key, en) === undefined) missing.push(`${key} (en)`);
+      if (at(key, hi) === undefined) missing.push(`${key} (hi)`);
+    }
+    expect(missing, `untranslated keys referenced by components:\n${missing.join('\n')}`).toEqual([]);
+    // Sanity: the scan has to be finding keys at all, or this test is theatre.
+    expect(used.size).toBeGreaterThan(60);
   });
 });

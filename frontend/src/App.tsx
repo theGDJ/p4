@@ -7,6 +7,7 @@ import { LandingPage } from '@/pages/landing';
 import { LoginPage, RegisterPage, ForgotPasswordPage, ResetPasswordPage } from '@/pages/auth';
 import { ChatPage } from '@/pages/chat';
 import { DashboardPage, AdminPage, NotFoundPage, BootScreen } from '@/pages/misc';
+import { AdminKnowledgePage } from '@/pages/admin-knowledge';
 
 /**
  * Route table.
@@ -80,6 +81,14 @@ export function App() {
           element={
             <RequireRole role="CONTENT_MANAGER">
               <AdminPage />
+            </RequireRole>
+          }
+        />
+        <Route
+          path="admin/knowledge"
+          element={
+            <RequireRole role="CONTENT_MANAGER">
+              <AdminKnowledgePage />
             </RequireRole>
           }
         />
