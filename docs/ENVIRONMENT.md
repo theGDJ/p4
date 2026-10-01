@@ -67,3 +67,43 @@ Not runnable here (must be authored and reported as unexecuted):
 These three are exit-gate items in PART B (P1, P2). They cannot be demonstrated in this sandbox as
 configured, so the choice of how to handle them was escalated to the user rather than silently
 substituted — substituting a canned success would itself violate R8/R10 in spirit.
+
+## P2: what "real provider" can and cannot mean here
+
+P2's exit-gate item is "real model-generated answers". The honest split, as measured in this sandbox:
+
+| Layer | Verified here | How |
+|---|---|---|
+| HTTP transport, auth headers, timeouts, retry/backoff, `Retry-After` | ✅ | `tests/providers.test.ts` drives the **real** `OpenAiCompatibleLlmProvider` / embedding client against a locally-served fake `/chat/completions` + `/embeddings` server |
+| Response parsing (truncation, malformed JSON, missing `usage`, wrong embedding count/dimensions) | ✅ | same suite, 27 tests |
+| Retrieval, citation validation, evidence tiers, answer cache, rewrite, ingestion pipeline, SSRF | ✅ | 310 tests across 10 files in `mock-api/`, all green |
+| Answer *quality* from a real multilingual model | ❌ impossible | `api.openai.com`, `generativelanguage.googleapis.com`, `huggingface.co` are unreachable (000) and no credentials exist |
+| pgvector's real cosine behaviour, FTS ranking, `docker compose up` | ❌ impossible | no Docker/Postgres here; `mvn verify` has never run |
+
+**Switching to a real provider is a config change, not a code change**: set `LLM_PROVIDER=openai-compatible`,
+`LLM_BASE_URL`, `LLM_API_KEY`, and the model names (see `.env.example`). The boot validator refuses that
+provider without the URL and key rather than quietly answering with the mock, and `EMBEDDING_*` may fall
+back to the `LLM_*` pair for a gateway that serves both. `/health/ready` reports `components.llmProvider`
+and `components.embeddingProvider`, and `/meta/bootstrap` carries `providers.llm.isMock` — which the UI
+must keep badging (R8). A process restart is what applies them: `resolveLlmProvider()` is called per
+request (so a test can rebuild the clients with `resetProviders()`), but nothing reloads the environment.
+
+### Numbers that only mean something with real embeddings
+
+Two thresholds in the code were tuned against the offline trigram embedding model, and both need
+re-measuring before a deployment trusts them:
+
+- `SIMILARITY_THRESHOLD = 0.94` for the answer cache. Measured on the mock model: a paraphrased
+  *different* question scored **0.988**, while two unrelated questions scored **0.937**. So under this
+  model the cache would happily answer "What is the carbon limit?" with the stored answer to
+  "What is the sulphur limit?". The tests therefore assert on exact-key behaviour and keep the semantic
+  path honest by measuring the distance, not by trusting it.
+- `EVIDENCE_SCORE_THRESHOLD = 0.12` (`src/rag/answer.ts`) and the near-duplicate overlap `0.82`
+  (`NEAR_DUPLICATE_OVERLAP` in `src/rag/retrieve.ts`; `dedupe-jaccard-threshold` on the Spring side).
+  Retrieval ranks by Reciprocal Rank
+  Fusion, whose rank score is **not** comparable to a cosine value, so these floors are only meaningful
+  in the vector-search leg — with `vector(1024)` empty, the mock ranking is lexical and a threshold
+  comparison is approximate at best.
+
+`knowledge/README.md` is the input the ingestion pipeline reads; `npm run verify` (typecheck + 310 mock
+tests + frontend tests + build + contrast) is the gate that must be green before any phase is called done.

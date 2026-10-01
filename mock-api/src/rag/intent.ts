@@ -1,5 +1,5 @@
 import type { Intent, Language } from '../constants';
-import { uwords, ustart } from './regex';
+import { namesStandard, uwords, ustart } from './regex';
 
 /**
  * Language detection and intent routing (§5, query path step 1).
@@ -160,6 +160,11 @@ const RULES: IntentRule[] = [
 export function isVague(text: string): boolean {
   const t = text.trim();
   if (t.length === 0) return true;
+  // Naming a standard IS the concrete subject: "What is the carbon limit in
+  // IS 10500?" is 8 words and completely answerable. Treating a short, specific
+  // question as vague is how an assistant ends up interrogating the user about a
+  // question they had already finished asking.
+  if (namesStandard(t)) return false;
   // A concrete subject means we have something to retrieve on.
   if (PRODUCT_SIGNALS.test(t)) return false;
   const words = t.split(/\s+/).filter(Boolean);

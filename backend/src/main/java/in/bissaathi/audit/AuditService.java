@@ -26,6 +26,17 @@ import org.springframework.transaction.annotation.Transactional;
  * No PII beyond the actor id, IP and user agent is stored. Emails are never written
  * to the audit log; the actor is identified by an opaque id that can be joined when
  * an ADMIN legitimately needs it.
+ *
+ * Action vocabulary (the Node reference implementation names the same strings, so a
+ * log reader sees one vocabulary whichever backend is running):
+ *   auth.register, auth.login.success, auth.login.failure, auth.lockout,
+ *   auth.refresh.reused, auth.logout, auth.password_reset.requested,
+ *   auth.password.changed, admin.access.denied, user.profile.updated,
+ *   conversation.deleted,
+ *   knowledge.ingest.requested, knowledge.ingest.throttled, knowledge.job.retry,
+ *   knowledge.chunk.approved, knowledge.chunk.rejected, knowledge.version.approved,
+ *   knowledge.version.rejected, knowledge.freshness.check,
+ *   feedback.recorded, mail.send.failed
  */
 @Service
 public class AuditService {

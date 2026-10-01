@@ -239,8 +239,19 @@ export interface ComposedAnswer {
   followUps: string[];
   /** Set when generation could not run; the UI must surface it (R8). */
   providerError: { code: string; message: string } | null;
+  /** True when the provider hit its output limit: the answer is cut, and says so. */
+  truncated: boolean;
+  /** How retrieval was actually phrased, when a rewrite was used (§5 step 2). */
+  rewrite?: { method: 'passthrough' | 'model' | 'rejected'; reason: string } | null;
   validation: CitationValidation | null;
-  usage: { promptTokens: number; completionTokens: number; model: string; costUsd: number; cacheHit: boolean };
+  usage: {
+    promptTokens: number;
+    completionTokens: number;
+    model: string;
+    /** null when the deployment has not configured pricing (§9, R10). */
+    costUsd: number | null;
+    cacheHit: boolean;
+  };
 }
 
 export function disclaimer(language: Language): string {
@@ -343,6 +354,7 @@ export async function composeAnswer(opts: {
   userText: string;
   history?: Array<{ role: 'user' | 'assistant'; content: string }>;
   cacheHit?: boolean;
+  rewrite?: { method: 'passthrough' | 'model' | 'rejected'; reason: string } | null;
 }): Promise<ComposedAnswer> {
   const { provider, retrieval, intent, language } = opts;
   const history = opts.history ?? [];
@@ -350,7 +362,7 @@ export async function composeAnswer(opts: {
 
   if (intent === 'out_of_scope' || intent === 'chitchat' || intent === 'meta') {
     const text = intent === 'out_of_scope' ? opts.userText : metaAnswer(intent, language);
-    return { text, sources: [], evidenceTier: 'NONE', followUps: [], providerError: null, validation: null, usage: baseUsage };
+    return { text, sources: [], evidenceTier: 'NONE', followUps: [], providerError: null, truncated: false, validation: null, usage: baseUsage };
   }
 
   if (intent === 'clarify') {
@@ -360,6 +372,7 @@ export async function composeAnswer(opts: {
       evidenceTier: 'NONE',
       followUps: clarificationQuestions(language),
       providerError: null,
+      truncated: false,
       validation: null,
       usage: baseUsage,
     };
@@ -374,6 +387,7 @@ export async function composeAnswer(opts: {
       evidenceTier: 'NONE',
       followUps: [],
       providerError: null,
+      truncated: false,
       validation: null,
       usage: baseUsage,
     };
@@ -394,6 +408,7 @@ export async function composeAnswer(opts: {
       evidenceTier: 'NONE',
       followUps: [],
       providerError: { code: 'PROVIDER_UNAVAILABLE', message },
+      truncated: false,
       validation: null,
       usage: baseUsage,
     };
@@ -413,7 +428,17 @@ export async function composeAnswer(opts: {
   const validation = validateCitations(cleanText, retrieval.sources);
   const evidenceTier = computeEvidenceTier(retrieval.sources, validation);
 
-  const text = validation.text.length > 0 ? validation.text : insufficientEvidenceAnswer(language);
+  let text = validation.text.length > 0 ? validation.text : insufficientEvidenceAnswer(language);
+  const truncated = result.finishReason === 'length';
+  if (truncated && validation.text.length > 0) {
+    // A truncated answer must announce itself: a half sentence that stops before a
+    // caveat is more dangerous than no answer at all (R8).
+    text = `${text} ${
+      language === 'hi'
+        ? '(उत्तर आउटपुट सीमा के कारण कट गया — कृपया आगे पूछें।)'
+        : '(The answer was cut short by the model output limit — ask me to continue.)'
+    }`;
+  }
 
   return {
     text,
@@ -421,6 +446,8 @@ export async function composeAnswer(opts: {
     evidenceTier,
     followUps: followUps.length > 0 ? followUps : [],
     providerError: null,
+    truncated,
+    rewrite: opts.rewrite ?? null,
     validation,
     usage: {
       promptTokens: result.promptTokens,

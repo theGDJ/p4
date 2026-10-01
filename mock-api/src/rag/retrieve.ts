@@ -82,28 +82,42 @@ function similarity(a: string, b: string): number {
 }
 
 /**
+ * Intent-specific document types (§5 step 3: "metadata filters (intent, language,
+ * status)"). `doc_type` is *soft* evidence: a QCO answering a hallmarking question
+ * is still relevant, so a non-preferred type is scored slightly lower rather than
+ * excluded. A hard exclusion on a vocabulary this coarse would hide real documents.
+ */
+export const PREFERRED_DOC_TYPES: Partial<Record<Intent, readonly string[]>> = {
+  hallmarking: ['GUIDE', 'STANDARD', 'FAQ', 'NOTIFICATION'],
+  certification: ['PROCEDURE', 'GUIDE', 'NOTIFICATION', 'FAQ', 'STANDARD', 'HANDBOOK', 'SCHEME'],
+  lab: ['LABORATORY_LIST', 'GUIDE', 'FAQ'],
+  recommend: ['STANDARD', 'QCO', 'NOTIFICATION', 'GUIDE'],
+  factual: ['STANDARD', 'HANDBOOK', 'FAQ', 'GUIDE'],
+};
+
+/** Applied to the lexical score; bounded so it can never outrank real term overlap. */
+const TYPE_PREFERENCE_BONUS = 1.12;
+
+export function docTypeBonus(intent: Intent, docType: string): number {
+  const preferred = PREFERRED_DOC_TYPES[intent];
+  return preferred && preferred.includes(docType) ? TYPE_PREFERENCE_BONUS : 1;
+}
+
+/**
  * Metadata filters (§5 step 3 tail, R7).
  * - `reviewState === APPROVED` and `verificationStatus !== SUPERSEDED` are enforced
  *   inside `knowledgeChunks.retrievable`, never here, so they cannot be bypassed.
  * - Language: prefer the query language but keep English chunks for Hindi queries,
  *   because cross-lingual retrieval is a stated requirement (§3).
- * - RESTRICTED documents contribute metadata only, never full text (R11).
+ * - RESTRICTED documents contribute metadata only, never full text (R11) — enforced
+ *   at ingestion: a restricted document has no chunks to retrieve.
  */
 function applyMetadataFilters(chunks: KnowledgeChunkRow[], language: Language, intent: Intent): KnowledgeChunkRow[] {
-  const intentDocTypes: Partial<Record<Intent, string[]>> = {
-    hallmarking: ['hallmarking', 'standard', 'faq', 'guide', 'notification'],
-    certification: ['procedure', 'guide', 'notification', 'faq', 'standard', 'handbook'],
-    lab: ['laboratory_list', 'guide', 'faq'],
-    recommend: ['standard', 'notification', 'guide'],
-  };
-  const allowedTypes = intentDocTypes[intent];
-
   return chunks.filter((c) => {
-    if (allowedTypes && allowedTypes.length > 0 && !allowedTypes.includes(c.docType)) {
-      // A wrong doc_type is a soft signal, not a hard exclusion: keep it but it will
-      // rank lower because it usually shares fewer tokens with the query.
-      return true;
-    }
+    // Language filter: a Hindi query may also read English chunks (cross-lingual
+    // retrieval is a stated requirement, §3), but an English query never pulls in
+    // a Hindi chunk, because that would put untranslated text in front of a user
+    // who asked in English.
     if (language === 'hi' && c.language !== 'hi' && c.language !== 'en') return false;
     if (language === 'en' && c.language !== 'en') return false;
     return true;
@@ -142,7 +156,8 @@ export function retrieve(
 
   const scored = candidates
     .map((chunk) => {
-      const { score, matched } = scoreChunk(queryTokens, chunk);
+      const { score: lexical, matched } = scoreChunk(queryTokens, chunk);
+      const score = Number((lexical * docTypeBonus(opts.intent, chunk.docType)).toFixed(4));
       return {
         chunk,
         score,

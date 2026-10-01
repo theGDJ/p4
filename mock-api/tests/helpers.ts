@@ -1,8 +1,11 @@
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import type { Express } from 'express';
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { createStore, type Store } from '../src/db/store';
-import { resetConfig } from '../src/config';
+import { loadConfig, resetConfig, setConfigForTests } from '../src/config';
+import { resetProviders } from '../src/rag/providers';
 
 /**
  * Test harness.
@@ -175,4 +178,87 @@ export async function newConversation(app: Express, accessToken: string, title?:
     .send(title ? { title } : {})
     .expect(201);
   return res.body.id as string;
+}
+
+/* ------------------------------------------------------------------------- *
+ * P2 helpers: a local stand-in for an OpenAI-compatible provider.
+ *
+ * The vendor APIs are unreachable from this sandbox (docs/ENVIRONMENT.md), so
+ * "the real provider works" can only be proven against a local server that speaks
+ * the same wire format. That is what this is: the request shape our client sends
+ * and the response shape it parses are both asserted for real, while the vendor's
+ * own behaviour remains unverified here.
+ * ------------------------------------------------------------------------- */
+
+export interface FakeRequest {
+  path: string;
+  method: string;
+  headers: Record<string, string | string[] | undefined>;
+  body: Record<string, unknown>;
+}
+
+export interface FakeProvider {
+  baseUrl: string;
+  port: number;
+  calls: FakeRequest[];
+  /** Queue one entry per call; a number is an HTTP status, an object is a 200 JSON body. */
+  replies: Array<{ status?: number; json?: unknown; headers?: Record<string, string>; delayMs?: number }>;
+  close(): Promise<void>;
+}
+
+export async function startFakeProvider(
+  replies: FakeProvider['replies'] = [],
+): Promise<FakeProvider> {
+  const calls: FakeRequest[] = [];
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      let parsed: Record<string, unknown> = {};
+      try {
+        parsed = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<string, unknown>;
+      } catch {
+        parsed = { _raw: Buffer.concat(chunks).toString('utf8') };
+      }
+      calls.push({
+        path: req.url ?? '',
+        method: req.method ?? '',
+        headers: req.headers,
+        body: parsed,
+      });
+      // An unqueued reply is a 500 naming the mistake, so a test that forgets to
+      // queue one fails loudly instead of silently reading a canned 'ok'.
+      const reply = replies.shift() ?? {
+        status: 500,
+        json: { error: { message: 'fake provider: no canned reply was queued for call ' + calls.length } },
+      };
+      const send = (): void => {
+        res.writeHead(reply.status ?? 200, { 'content-type': 'application/json', ...(reply.headers ?? {}) });
+        res.end(JSON.stringify(reply.json ?? {}));
+      };
+      if (reply.delayMs) setTimeout(send, reply.delayMs);
+      else send();
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    port,
+    calls,
+    replies,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+/** Points the LLM and embedding providers at `baseUrl` and rebuilds the clients. */
+export function useProviderConfig(overrides: Record<string, string | undefined>): void {
+  const env = { ...process.env, ...overrides };
+  for (const [k, v] of Object.entries(overrides)) {
+    if (v === undefined) delete env[k];
+    else env[k] = v;
+  }
+  setConfigForTests(loadConfig(env as NodeJS.ProcessEnv));
+  resetProviders();
 }

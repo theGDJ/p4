@@ -201,16 +201,42 @@ bissaathi:
     # it is active (R8/R10).
     llm-provider: ${LLM_PROVIDER:mock}
     embedding-provider: ${EMBEDDING_PROVIDER:mock}
-    embedding-dimensions: 1024
-    top-k-vector: 30
-    top-k-fts: 30
-    max-context-chunks: 6
-    max-context-tokens: 3000
+    llm-base-url: ${LLM_BASE_URL:}
+    llm-api-key: ${LLM_API_KEY:}
+    llm-small-model: ${LLM_SMALL_MODEL:mock-small}
+    llm-large-model: ${LLM_LARGE_MODEL:mock-large}
+    # Costs are reported only when priced: an unset price means a null cost, never a
+    # guessed one (R10).
+    llm-price-input-per-mtok: ${LLM_PRICE_INPUT_PER_MTOK:}
+    llm-price-output-per-mtok: ${LLM_PRICE_OUTPUT_PER_MTOK:}
+    embedding-base-url: ${EMBEDDING_BASE_URL:}
+    embedding-api-key: ${EMBEDDING_API_KEY:}
+    embedding-model: ${EMBEDDING_MODEL:mock-multilingual-1}
+    # Must match `knowledge_chunks.embedding vector(1024)` in V1__init.sql: changing
+    # this is a re-embed of the corpus, not a restart.
+    embedding-dimensions: ${EMBEDDING_DIMENSIONS:1024}
+    top-k-vector: ${RAG_TOP_K_RETRIEVE:30}
+    top-k-fts: ${RAG_TOP_K_RETRIEVE:30}
+    max-context-chunks: ${RAG_TOP_K_FINAL:6}
+    max-context-tokens: ${RAG_CONTEXT_MAX_TOKENS:3000}
     # Cosine-similarity floor for a chunk to count as evidence for STRONG tier.
     evidence-score-threshold: 0.12
     dedupe-jaccard-threshold: 0.82
     temperature: 0.0
     max-follow-ups: 3
+    history-turns: ${RAG_HISTORY_TURNS:4}
+    summary-max-tokens: ${RAG_SUMMARY_MAX_TOKENS:150}
+    # Timeouts and retries are per call, not per turn: one question can make several
+    # requests (routing, rewrite, answer), and a hung provider must not hold an SSE
+    # stream open forever.
+    # Milliseconds, like the env names: a `timeout-seconds` bound from
+    # `${LLM_TIMEOUT_MS:...}` would be an invisible factor-of-1000 bug that only shows
+    # up as a request that hangs for eleven hours.
+    llm-timeout-millis: ${LLM_TIMEOUT_MS:45000}
+    llm-max-retries: ${LLM_MAX_RETRIES:2}
+    embedding-timeout-millis: ${EMBEDDING_TIMEOUT_MS:30000}
+    embedding-max-retries: ${EMBEDDING_MAX_RETRIES:2}
+    embedding-batch-size: ${EMBEDDING_BATCH_SIZE:32}
 
   answers:
     # Contractual strings (CLAUDE.md §5 R4/R5). They are configuration so that a
@@ -224,6 +250,55 @@ bissaathi:
       नहीं मिली।
     disclaimer-en: Informational — verify against current official sources
     disclaimer-hi: सूचनात्मक — कृपया वर्तमान आधिकारिक स्रोतों से सत्यापित करें
+    cache:
+      # The semantic answer cache (§9). A turn is cacheable only when it is
+      # impersonal, has no prior history, produced evidence and hit no provider error;
+      # keys carry the knowledge-base version so an approval or rejection invalidates
+      # every answer that quoted the affected chunk.
+      enabled: ${SEMANTIC_CACHE_ENABLED:true}
+      ttl-seconds: ${ANSWER_CACHE_TTL_SECONDS:900}
+      max-entries: ${ANSWER_CACHE_MAX_ENTRIES:500}
+      # Measured on the offline trigram embeddings, 0.94 already admits two different
+      # questions; treat this as a floor to re-validate with real multilingual
+      # embeddings, not a tuned value (docs/ENVIRONMENT.md).
+      similarity: ${SEMANTIC_CACHE_SIMILARITY:0.94}
+
+  ingestion:
+    # §5. The byte cap is enforced while streaming, not from Content-Length, so a
+    # server that announces 1 KB and sends 1 GB is cut off mid-body.
+    max-bytes: ${INGEST_MAX_BYTES:25000000}
+    timeout-millis: ${INGEST_TIMEOUT_MS:20000}
+    max-redirects: ${INGEST_MAX_REDIRECTS:3}
+    # Test-only. Fatal in production: with this on, an operator-supplied URL can point
+    # at loopback, RFC1918 or a cloud metadata endpoint (docs/SECURITY.md §9).
+    allow-private-networks: ${INGEST_ALLOW_PRIVATE_NETWORKS:false}
+    user-agent: ${INGEST_USER_AGENT:BIS-Saathi-knowledge-ingestion/0.1}
+    max-pages: ${INGEST_MAX_PAGES:120}
+    chunk-min-tokens: ${CHUNK_MIN_TOKENS:300}
+    chunk-max-tokens: ${CHUNK_MAX_TOKENS:500}
+    chunk-overlap-ratio: ${CHUNK_OVERLAP_RATIO:0.1}
+    manifest-path: ${KNOWLEDGE_MANIFEST_PATH:knowledge/manifest.csv}
+    upload-dir: ${UPLOAD_DIR:uploads}
+    upload-max-bytes: ${UPLOAD_MAX_BYTES:26214400}
+    # Submissions are throttled per account, not per IP: one manager pasting a 400-row
+    # manifest must not starve the queue for everybody else.
+    burst-capacity: ${INGEST_BURST_CAPACITY:12}
+    sustained-per-minute: ${INGEST_SUSTAINED_PER_MINUTE:12}
+
+  mail:
+    # none | log | smtp. With `none` the reset endpoint says no mail could be sent
+    # instead of claiming a delivery that never happened (R8).
+    transport: ${MAIL_TRANSPORT:log}
+    url: ${SMTP_URL:}
+    host: ${SMTP_HOST:}
+    port: ${SMTP_PORT:587}
+    secure: ${SMTP_SECURE:false}
+    user: ${SMTP_USER:}
+    pass: ${SMTP_PASS:}
+    from: ${SMTP_FROM:}
+    subject-prefix: ${MAIL_SUBJECT_PREFIX:[BIS-Saathi]}
+    # Reset links are absolute; unset means the mail states the token itself.
+    public-url: ${APP_PUBLIC_URL:}
 
   seed:
     # Dev-only demo accounts. Disabled unless explicitly enabled AND the profile is

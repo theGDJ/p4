@@ -9,6 +9,7 @@ import { logger } from './lib/logger';
 import { globalRateLimit } from './lib/rateLimit';
 import { JSON_BODY_LIMIT } from './lib/validate';
 import { adminRouter, healthRouter } from './modules/meta/routes';
+import { ingestionRouter } from './modules/ingestion/routes';
 import { authRouter } from './modules/auth/routes';
 import { chatRouter } from './modules/chat/routes';
 import { userRouter } from './modules/user/routes';
@@ -72,6 +73,10 @@ export function createApp(store: Store = db()): Express {
   );
 
   // §8: request size limits before parsing.
+  // Ingestion payloads (base64 uploads, pasted documents) legitimately need more
+  // than a JSON API usually does, so that one prefix gets its own, larger limit.
+  // body-parser marks the request parsed, so the general limiter below skips it.
+  app.use(`${c.API_BASE_PATH}/admin/ingestion`, express.json({ limit: ingestionBodyLimit(c.INGEST_MAX_BYTES) }));
   app.use(express.json({ limit: JSON_BODY_LIMIT }));
   app.use(express.urlencoded({ extended: false, limit: JSON_BODY_LIMIT }));
   app.use(cookieParser());
@@ -85,6 +90,8 @@ export function createApp(store: Store = db()): Express {
   app.use(`${base}/users`, userRouter(store));
   app.use(`${base}/conversations`, chatRouter(store));
   app.use(base, adminRouter(store));
+  // Mounted at the base: it owns both /admin/ingestion/* and /admin/knowledge/*.
+  app.use(base, ingestionRouter(store));
 
   // A tiny root pointer so hitting the bare port is not a mystery 404.
   app.get('/', (_req, res) => {
@@ -100,6 +107,11 @@ export function createApp(store: Store = db()): Express {
   app.use(errorHandler);
 
   return app;
+}
+
+/** Base64 inflates bytes by ~4/3; the JSON limit is set from the byte limit. */
+export function ingestionBodyLimit(maxBytes: number): string {
+  return `${Math.ceil((maxBytes * 4) / 3 / (1024 * 1024)) + 2}mb`;
 }
 
 export { createStore };

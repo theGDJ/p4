@@ -63,14 +63,16 @@ export function hashRefreshToken(rawToken: string): string {
   return createHash('sha256').update(rawToken).digest('hex');
 }
 
+/** The window a reset link stays valid, shared by the token and the mail wording. */
+export const RESET_TOKEN_TTL_MINUTES = 30;
+
 /** Password-reset token: opaque, single use, short-lived, stored hashed. */
 export function issueResetToken(): { rawToken: string; tokenHash: string; expiresAt: Date } {
   const rawToken = randomBytes(32).toString('base64url');
   return {
     rawToken,
     tokenHash: createHash('sha256').update(rawToken).digest('hex'),
-    // 30 minutes is the usual window; the link is single-use and bound to one user.
-    expiresAt: new Date(Date.now() + 30 * 60_000),
+    expiresAt: new Date(Date.now() + RESET_TOKEN_TTL_MINUTES * 60_000),
   };
 }
 
