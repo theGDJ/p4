@@ -1,0 +1,140 @@
+# BIS-Saathi — local development stack
+#
+#   cp .env.example .env      # then edit the two REQUIRED secrets
+#   docker compose up --build
+#
+# Services: frontend (Vite) -> backend (Spring Boot) -> postgres (pgvector) + redis.
+#
+# NOTE: this file is authored but could NOT be executed in the build sandbox
+# (no Docker daemon, no JDK). See docs/ENVIRONMENT.md. To run the same stack
+# without Docker/JDK use the Node mock API instead:  npm run dev:mock
+name: bis-saathi
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg17}
+    container_name: bissaathi-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-bissaathi}
+      POSTGRES_USER: ${POSTGRES_USER:-bissaathi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready succeeds before extensions exist, so also assert pgvector is loadable.
+      test:
+        - CMD-SHELL
+        - "pg_isready -U ${POSTGRES_USER:-bissaathi} -d ${POSTGRES_DB:-bissaathi} && psql -U ${POSTGRES_USER:-bissaathi} -d ${POSTGRES_DB:-bissaathi} -tAc 'CREATE EXTENSION IF NOT EXISTS vector; SELECT 1' >/dev/null"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    logging: *default-logging
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7.4-alpine}
+    container_name: bissaathi-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    logging: *default-logging
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: bissaathi/backend:0.1.0
+    container_name: bissaathi-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: ${APP_ENV:-development}
+      SERVER_PORT: 8080
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-bissaathi}
+      POSTGRES_USER: ${POSTGRES_USER:-bissaathi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?set JWT_ACCESS_SECRET in .env}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?set JWT_REFRESH_SECRET in .env}
+      JWT_ACCESS_TTL_MINUTES: ${JWT_ACCESS_TTL_MINUTES:-15}
+      JWT_REFRESH_TTL_DAYS: ${JWT_REFRESH_TTL_DAYS:-14}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      COOKIE_SAME_SITE: ${COOKIE_SAME_SITE:-Lax}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-mock}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    ports:
+      - "${PORT_BACKEND:-8080}:8080"
+    volumes:
+      - uploads:/app/uploads
+    logging: *default-logging
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: bissaathi/frontend:0.1.0
+    container_name: bissaathi-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      # Consumed at container start by the nginx entrypoint, not at build time.
+      API_BASE_PATH: ${API_BASE_PATH:-/api/v1}
+    ports:
+      - "${PORT_FRONTEND:-5173}:80"
+    logging: *default-logging
+
+  # Optional: the Node mock API, so the frontend can be exercised without the JVM.
+  #   docker compose --profile mock up
+  mock-api:
+    profiles: ["mock"]
+    build:
+      context: ./mock-api
+      dockerfile: Dockerfile
+    image: bissaathi/mock-api:0.1.0
+    container_name: bissaathi-mock-api
+    restart: unless-stopped
+    environment:
+      PORT: ${PORT_MOCK_API:-8081}
+      APP_ENV: ${APP_ENV:-development}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?set JWT_ACCESS_SECRET in .env}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-}
+      COOKIE_SECURE: "false"
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+    ports:
+      - "${PORT_MOCK_API:-8081}:8081"
+    logging: *default-logging
+
+volumes:
+  pgdata:
+  redisdata:
+  uploads:

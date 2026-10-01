@@ -1,0 +1,39 @@
+{
+  "name": "@bis-saathi/mock-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Runnable Node/TS implementation of docs/API.md. Dev-only stand-in for backend/ (Spring Boot 4.1.1), which cannot be compiled or run in the build sandbox - no JDK, Maven, Docker, Postgres or Redis are available there. See docs/ENVIRONMENT.md.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@node-rs/argon2": "2.2.1",
+    "bcryptjs": "3.0.3",
+    "cookie-parser": "1.4.7",
+    "cors": "2.8.6",
+    "express": "5.2.1",
+    "helmet": "8.3.0",
+    "jsonwebtoken": "9.0.3",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "1.4.10",
+    "@types/cors": "2.8.19",
+    "@types/express": "5.0.6",
+    "@types/jsonwebtoken": "9.0.10",
+    "@types/node": "26.6.3",
+    "@types/supertest": "7.2.1",
+    "supertest": "7.3.0",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vitest": "5.0.3"
+  }
+}
