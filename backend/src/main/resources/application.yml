@@ -1,0 +1,249 @@
+# =============================================================================
+#  BIS-Saathi backend configuration.
+#
+#  Every value that differs between environments comes from the environment; this
+#  file holds only structure and safe defaults. `docker-compose.yml` and
+#  `.env.example` at the repo root are the authoritative list of variables — a key
+#  added here without an entry there will not be set in a real deployment.
+#
+#  ⚠ Authored, not executed: no JVM or PostgreSQL was available in the authoring
+#  sandbox, so this file has never been loaded by Spring (see docs/ENVIRONMENT.md).
+# =============================================================================
+
+spring:
+  application:
+    name: bis-saathi-backend
+
+  # ---------------------------------------------------------------- datasource
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:bissaathi}
+    username: ${POSTGRES_USER:bissaathi}
+    password: ${POSTGRES_PASSWORD:}
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX:10}
+      minimum-idle: 2
+      connection-timeout: 5000
+      # Fail fast rather than queueing behind a dead database (R8).
+      initialization-fail-timeout: 5000
+
+  jpa:
+    hibernate:
+      # Flyway owns the schema. `validate` catches a drift between the entities and
+      # V1__init.sql at boot instead of at first query.
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 50
+          time_zone: UTC
+        order_inserts: true
+        order_updates: true
+        query:
+          fail_on_pagination_over_collection_fetch: true
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+    # A failed migration must stop the app; booting on a half-applied schema would
+    # produce wrong answers that look correct.
+    clean-disabled: true
+    validate-on-migrate: true
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 2s
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+
+  # Jackson 3 in Boot 4 lives under tools.jackson; these property names are the
+  # Boot-level ones and are unchanged.
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+      fail-on-empty-beans: false
+    deserialization:
+      # Rejects unknown JSON keys, which is what stops a client from smuggling
+      # `roles` or `emailVerified` into PATCH /users/me (§8).
+      fail-on-unknown-properties: true
+
+  threads:
+    virtual:
+      # Java 21 virtual threads: SSE streams are I/O-bound and mostly parked.
+      enabled: true
+
+# --------------------------------------------------------------------- server
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+  # Behind the frontend proxy / nginx, so the real client IP arrives in a header.
+  forward-headers-strategy: framework
+  error:
+    # The GlobalExceptionHandler owns error bodies; Boot's whitelabel must never
+    # leak a stack trace or an internal message (§8).
+    include-message: never
+    include-stacktrace: never
+    include-binding-errors: never
+    include-exception: false
+  servlet:
+    encoding:
+      charset: UTF-8
+      force: true
+
+# ------------------------------------------------------------------- actuator
+management:
+  endpoints:
+    web:
+      exposure:
+        # info only. Health is served by MetaController at the two paths docs/API.md
+        # fixes (/health/live, /health/ready); exposing Actuator's own /health,
+        # /health/liveness and /health/readiness alongside them would give a
+        # deployment four health URLs, three of which nothing checks.
+        include: info
+      base-path: /api/v1
+  endpoint:
+    health:
+      # Enabled so the db/redis indicators are still contributed to the readiness
+      # group that Actuator exposes on the management port, but NOT published under
+      # /api/v1 — docs/API.md fixes the two public paths and MetaController implements
+      # them. No `group:` block here: Boot's property is singular
+      # (management.endpoint.health.group.<name>.include), and a plural key would be
+      # silently ignored, which is worse than not writing it.
+      enabled: true
+      show-details: never
+  info:
+    env:
+      enabled: true
+
+# -------------------------------------------------------------------- springdoc
+springdoc:
+  api-docs:
+    enabled: true
+    path: /api/v1/openapi.json
+  swagger-ui:
+    enabled: true
+    path: /api/v1/docs
+    # The API contract is docs/API.md; Swagger UI is a convenience, never the spec.
+    operations-sorter: alpha
+
+# =============================================================================
+#  Application configuration (bound by AppProperties)
+# =============================================================================
+bissaathi:
+  cors:
+    # An allowlist, never "*". The Vite dev server and the preview host are added
+    # by docker-compose / .env; the default only permits local development.
+    # Comma-separated, exactly as .env.example documents it.
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
+
+  jwt:
+    # HS256 with a >= 32-byte secret. There is deliberately no second secret for the
+    # refresh token: those are opaque random strings matched by digest, never signed.
+    # CookiePropertiesValidator refuses a development value in a production profile.
+    secret: ${JWT_ACCESS_SECRET:}
+    access-ttl-minutes: ${JWT_ACCESS_TTL_MINUTES:15}
+    issuer: ${JWT_ISSUER:bis-saathi}
+    audience: ${JWT_AUDIENCE:bis-saathi-web}
+
+  refresh:
+    ttl-days: ${JWT_REFRESH_TTL_DAYS:14}
+    # Name and path are fixed by docs/API.md and by AuthController's mapping, so
+    # they are literals rather than environment knobs: a renamed cookie silently
+    # breaks reuse detection, which is not a thing to discover at deploy time.
+    cookie-name: bs_refresh
+    cookie-path: /api/v1/auth
+    # Secure + HttpOnly + SameSite are non-negotiable (§8). `same-site: none` would
+    # be required only for a cross-site frontend and is refused at boot.
+    secure: ${COOKIE_SECURE:true}
+    same-site: ${COOKIE_SAME_SITE:Lax}
+
+  password:
+    min-length: 10
+    max-length: 200
+    # argon2id is the default; bcrypt(12) is the documented fallback for
+    # environments without BouncyCastle. Hashes record which was used.
+    # argon2id always; bcrypt(12) is only used to verify a hash recorded with it.
+    scheme: argon2id
+    argon2:
+      memory-kib: 19456
+      iterations: 2
+      parallelism: 1
+    bcrypt-strength: 12
+    reset-token-ttl-minutes: 30
+
+  lockout:
+    max-failed-attempts: ${LOGIN_MAX_FAILED_ATTEMPTS:5}
+    lock-minutes: ${LOGIN_LOCKOUT_MINUTES:15}
+
+  rate-limit:
+    # The window and general ceiling come from the shared pair; the auth bucket is
+    # tighter because that is the credential-guessing surface.
+    enabled: true
+    auth-max: ${RATE_LIMIT_AUTH_MAX:10}
+    auth-window-seconds: ${RATE_LIMIT_WINDOW_SECONDS:60}
+    chat-max: ${RATE_LIMIT_MAX_REQUESTS:120}
+    chat-window-seconds: ${RATE_LIMIT_WINDOW_SECONDS:60}
+
+  csrf:
+    enabled: ${CSRF_ENABLED:true}
+    cookie-name: XSRF-TOKEN
+    header-name: X-XSRF-TOKEN
+
+  rag:
+    # Provider switch (§3: config-switchable, mockable in tests). `mock` is the
+    # default and is deterministic; the UI must show a MOCK PROVIDER badge whenever
+    # it is active (R8/R10).
+    llm-provider: ${LLM_PROVIDER:mock}
+    embedding-provider: ${EMBEDDING_PROVIDER:mock}
+    embedding-dimensions: 1024
+    top-k-vector: 30
+    top-k-fts: 30
+    max-context-chunks: 6
+    max-context-tokens: 3000
+    # Cosine-similarity floor for a chunk to count as evidence for STRONG tier.
+    evidence-score-threshold: 0.12
+    dedupe-jaccard-threshold: 0.82
+    temperature: 0.0
+    max-follow-ups: 3
+
+  answers:
+    # Contractual strings (CLAUDE.md §5 R4/R5). They are configuration so that a
+    # translation fix does not require a code change — but tests assert them
+    # verbatim, so they cannot drift silently.
+    insufficient-evidence-en: >-
+      I could not find sufficient information in the authorized knowledge base to
+      answer this reliably.
+    insufficient-evidence-hi: >-
+      मुझे इसका विश्वसनीय उत्तर देने के लिए अधिकृत ज्ञान-कोष में पर्याप्त जानकारी
+      नहीं मिली।
+    disclaimer-en: Informational — verify against current official sources
+    disclaimer-hi: सूचनात्मक — कृपया वर्तमान आधिकारिक स्रोतों से सत्यापित करें
+
+  seed:
+    # Dev-only demo accounts. Disabled unless explicitly enabled AND the profile is
+    # not production; the generated passwords are printed once to the log.
+    enabled: ${SEED_DEMO_USERS:false}
+    password: ${SEED_DEMO_PASSWORD:}
+
+# ----------------------------------------------------------------------- logging
+# Structured JSON logs (§3). No PII is logged: emails are hashed, tokens never
+# appear, and the audit trail carries the trace ref instead.
+logging:
+  level:
+    root: ${LOG_LEVEL:INFO}
+    # One knob, not three: DEBUG on LOG_LEVEL raises the application logger too. A
+    # separate APP_LOG_LEVEL is a variable that only exists in this file and would
+    # never be found by whoever configures a deployment.
+    in.bissaathi: ${LOG_LEVEL:INFO}
+    org.springframework.security: WARN
+    org.hibernate.SQL: WARN
+  pattern:
+    console: >-
+      {"ts":"%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX}","level":"%p","logger":"%logger{36}",
+      "trace":"%X{traceRef:-}","msg":"%replace(%m){'\"','\\\"'}"%n}

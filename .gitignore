@@ -1,0 +1,42 @@
+# --- dependencies / builds ---
+node_modules/
+dist/
+build/
+out/
+target/
+.vite/
+*.tsbuildinfo
+
+# --- env / secrets (never commit; see .env.example) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.jks
+secrets/
+
+# --- logs / coverage ---
+logs/
+*.log
+coverage/
+.nyc_output/
+
+# --- local data (mock-api persistence, uploads, pg data) ---
+mock-api/.data/
+data/
+uploads/
+pgdata/
+redisdata/
+
+# --- editors / os ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- python (eval harness) ---
+__pycache__/
+.venv/
+.pytest_cache/

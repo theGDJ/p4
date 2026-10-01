@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  BIS-Saathi backend — Java 21 / Spring Boot 4.1.1 modular monolith.
+
+  Version policy (§3 "Pin versions"):
+   * Spring Boot pins the platform (4.1.1). Everything the Boot BOM manages is left
+     unversioned on purpose — re-pinning a managed artifact is how a build drifts
+     into an untested combination.
+   * Anything NOT managed by Boot is pinned explicitly below with a comment saying
+     where the version was verified.
+   * Boot 4.1.1 manages: Spring Framework 7.0.9, Jackson 3.1.5, Tomcat 11.0.24,
+     JUnit Jupiter 6.0.3, Mockito 5.23.0, AssertJ 3.27.7.
+
+  ⚠ THIS POM HAS NOT BEEN COMPILED IN THE AUTHORING ENVIRONMENT. There is no JDK,
+  no Maven and no route to Maven Central in the sandbox this was written in (see
+  docs/ENVIRONMENT.md). It is authored source, reviewed against the published
+  Spring Boot 4.1.1 artifact list, and must be built before it is trusted (R8).
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <!-- Verified against github.com/spring-projects/spring-boot/releases: 4.1.1 is
+         the current stable (2026-08-20). 4.2.0-M1/M2 are milestones — not used. -->
+    <version>4.1.1</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>in.bissaathi</groupId>
+  <artifactId>bis-saathi-backend</artifactId>
+  <version>0.1.0</version>
+  <name>BIS-Saathi backend</name>
+  <description>Source-grounded bilingual assistant for Indian Standards and BIS services.</description>
+
+  <properties>
+    <java.version>21</java.version>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- Boot 4 uses Jackson 3 (tools.jackson) for the platform but springdoc 3.x
+         still publishes against the Jackson 2 annotations artifact. Pinned from
+         github.com/springdoc/springdoc-openapi/releases (3.1.1, 2026-09-06). -->
+    <springdoc.version>3.1.1</springdoc.version>
+    <!-- Latest pgvector release tag (v0.8.6); the Java driver is versioned
+         separately and is deliberately NOT used — see the note on embeddings. -->
+    <testcontainers.version>1.21.3</testcontainers.version>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <!--
+        Spring AI (§3) is imported for version alignment only. No concrete Spring AI
+        starter is declared in P1: LLM and embedding access goes through this
+        project's own `LlmProvider` / `EmbeddingProvider` interfaces, whose default
+        implementation is a deterministic mock. The starter is added in P2 once a
+        provider is chosen and the Boot 4.1 / Spring AI 2.0 pairing has been
+        validated by an actual build.
+      -->
+      <dependency>
+        <groupId>org.springframework.ai</groupId>
+        <artifactId>spring-ai-bom</artifactId>
+        <!-- Verified as latest stable via github.com/spring-projects/spring-ai/releases
+             (2.0.1, 2026-08-21). Boot compatibility UNVALIDATED — do not add a
+             starter until a build has proven it. -->
+        <version>2.0.1</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.testcontainers</groupId>
+        <artifactId>testcontainers-bom</artifactId>
+        <version>${testcontainers.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <!-- ------------------------------------------------------------- platform -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+    <!-- New in Boot 4: Flyway moved to its own starter (Boot 3 needed
+         org.flywaydb:flyway-core directly). -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-flyway</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-redis</artifactId>
+    </dependency>
+    <!-- Brings nimbus-jose-jwt (BOM-managed) so HS256 access tokens are produced
+         with Spring Security's own encoder/decoder rather than a third-party JWT
+         library of unverified vintage. -->
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-oauth2-jose</artifactId>
+    </dependency>
+
+    <!-- ---------------------------------------------------------------- driver -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+    <!-- Flyway needs the database-specific module since v10. -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-database-postgresql</artifactId>
+    </dependency>
+
+    <!--
+      pgvector note: the `vector` column is deliberately NOT mapped as a JPA
+      attribute. Embedding read/write goes through native SQL in
+      RetrievalService, which keeps the com.pgvector Java driver (separately
+      versioned, not BOM-managed) out of the build and avoids a silent
+      dimension/type mismatch between the driver and the column.
+    -->
+
+    <!-- ----------------------------------------------------------------- argon -->
+    <!-- Spring Security's Argon2PasswordEncoder delegates to BouncyCastle. The
+         version is managed by Boot, so it is not pinned here. -->
+    <dependency>
+      <groupId>org.bouncycastle</groupId>
+      <artifactId>bcprov-jdk18on</artifactId>
+    </dependency>
+
+    <!-- ------------------------------------------------------------------ docs -->
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+      <version>${springdoc.version}</version>
+    </dependency>
+
+    <!-- ----------------------------------------------------------------- build -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-configuration-processor</artifactId>
+      <optional>true</optional>
+    </dependency>
+
+    <!-- ----------------------------------------------------------------- tests -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>bis-saathi-backend</finalName>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <configuration>
+          <excludes>
+            <exclude>
+              <groupId>org.springframework.boot</groupId>
+              <artifactId>spring-boot-configuration-processor</artifactId>
+            </exclude>
+          </excludes>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <!-- §8 requires the security tests to run in CI; a skipped suite must be
+               a build failure, not a quiet pass. -->
+          <skipTests>false</skipTests>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
