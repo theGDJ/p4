@@ -42,6 +42,45 @@ export type VerificationStatus = (typeof VERIFICATION_STATUSES)[number];
 export const EVIDENCE_TIERS = ['STRONG', 'PARTIAL', 'NONE'] as const;
 export type EvidenceTier = (typeof EVIDENCE_TIERS)[number];
 
+/**
+ * §5/§7 — the controlled `doc_type` vocabulary.
+ *
+ * Retrieval filters on this (the `intent → doc_type` preference map), and the
+ * ingestion API validates against it, so it is a contract rather than a hint.
+ * `standards.doc_type` is a different axis (what kind of *publication* a standard
+ * is: IS / QCO / handbook) and is not reused here.
+ */
+export const DOC_TYPES = [
+  'STANDARD',
+  'QCO',
+  'PROCEDURE',
+  'GUIDE',
+  'FAQ',
+  'NOTIFICATION',
+  'LABORATORY_LIST',
+  'HANDBOOK',
+  'SCHEME',
+  'OTHER',
+] as const;
+export type DocType = (typeof DOC_TYPES)[number];
+
+/** §5 — ingestion job states. `DONE` and `FAILED` are terminal. */
+export const INGESTION_STATES = ['QUEUED', 'RUNNING', 'DONE', 'FAILED'] as const;
+export type IngestionState = (typeof INGESTION_STATES)[number];
+
+/** §5 — pipeline stages, recorded so a failure names the step that broke. */
+export const INGESTION_STAGES = [
+  'QUEUED',
+  'FETCH',
+  'EXTRACT',
+  'CLEAN',
+  'CHUNK',
+  'EMBED',
+  'PERSIST',
+  'DONE',
+] as const;
+export type IngestionStage = (typeof INGESTION_STAGES)[number];
+
 /** §4 — roles. ADMIN implies CONTENT_MANAGER. */
 export const ROLES = ['USER', 'CONTENT_MANAGER', 'ADMIN'] as const;
 export type Role = (typeof ROLES)[number];

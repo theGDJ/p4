@@ -18,7 +18,14 @@ import { assessScope, detectPii, piiWarning, redactPii, scopeRefusal } from '../
 import { detectLanguage, route as routeIntent, suggestFollowUps } from '../../rag/intent';
 import { composeAnswer, SYSTEM_PROMPT } from '../../rag/answer';
 import { resolveLlmProvider } from '../../rag/providers';
+import { rewriteToStandaloneQuery } from '../../rag/rewrite';
 import { retrieve } from '../../rag/retrieve';
+import { gapQueries } from '../../db/store';
+import { cacheableTurn, lookupAnswer, storeAnswer } from '../../lib/answerCache';
+import { recordFeedbackSchema } from '../../lib/validate';
+import { feedback } from '../../db/store';
+import { AUDIT_ACTIONS, recordAudit } from '../../lib/audit';
+import { clientIp } from '../../lib/rateLimit';
 
 /**
  * Conversations and the SSE message stream (features #2, #3; §5 query path).
@@ -68,6 +75,7 @@ function publicMessage(m: MessageRow) {
     usage: {
       promptTokens: m.promptTokens,
       completionTokens: m.completionTokens,
+      costUsd: m.costUsd,
       model: m.model,
       cacheHit: m.cacheHit,
       retrievalMs: m.retrievalMs,
@@ -96,7 +104,6 @@ function sseSend(res: Response, event: string, data: unknown): void {
 export function chatRouter(store: Store): Router {
   const router = Router();
   router.use(authenticate(store));
-  const provider = resolveLlmProvider();
 
   /* ---------------------------------------------------- conversation CRUD */
 
@@ -161,6 +168,10 @@ export function chatRouter(store: Store): Router {
   /* -------------------------------------------------------- SSE answering */
 
   router.post('/:id/messages', validateParams(idParam), validateBody(sendMessageSchema), async (req, res) => {
+    // Resolved per request, not at mount: `resetProviders()` and the config the
+    // tests swap in must be able to take effect without rebuilding the whole app, and a
+    // provider captured at startup would silently outlive a config reload in production.
+    const provider = resolveLlmProvider();
     const r = req as AuthenticatedRequest;
     const conversation = conversations.byIdForUser(store, routeId(req), r.user!.id);
     if (!conversation) throw notFound('Conversation');
@@ -193,6 +204,7 @@ export function chatRouter(store: Store): Router {
       language,
       promptTokens: 0,
       completionTokens: 0,
+      costUsd: null,
       model: null,
       cacheHit: false,
       retrievalMs: null,
@@ -241,13 +253,86 @@ export function chatRouter(store: Store): Router {
       sseSend(res, 'delta', { text: `${piiWarning(language)}\n\n` });
     }
 
-    // §5 steps 3–4 — retrieve (skipped for chitchat/meta/clarify per §9).
-    const retrieval = decision.retrieve
-      ? retrieve(store, redacted, { language: decision.language, intent: decision.intent })
+    // §5 step 2 — rolling summary + last 4 turns (§9 history budget). The turn being
+    // answered is already persisted, so it has to be excluded: otherwise every question
+    // arrives with itself as history, which both inflates the prompt and makes
+    // `cacheableTurn`'s "no history" condition permanently false — a cache that is
+    // never consulted, and a rewrite model shown the question it is being asked to
+    // rewrite. `excludeMessageId` is what keeps "prior turns" meaning prior turns.
+    const history = recentHistory(store, conversation.id, r.user!.id, userRow.id);
+
+    // §9 — the cache is consulted before retrieval, because a hit means no
+    // retrieval and no generation at all. Only impersonal, history-free turns
+    // qualify (see lib/answerCache.ts for why that gate exists).
+    const mayUseCache =
+      decision.retrieve &&
+      cacheableTurn({
+        intent: decision.intent,
+        piiDetected: pii.length > 0,
+        hasHistory: history.length > 0,
+        providerError: null,
+      });
+    const looked = mayUseCache
+      ? await lookupAnswer({
+          query: redacted,
+          language: decision.language,
+          intent: decision.intent,
+          kbVersion: store.kbVersion,
+        })
       : null;
 
-    // §5 step 2 — rolling summary + last 4 turns (§9 history budget).
-    const history = recentHistory(store, conversation.id, r.user!.id);
+    if (looked?.answer) {
+      const hit = looked.answer;
+      const assistantRow = persistAssistant(store, conversation.id, r.user!.id, hit.text, {
+        language,
+        intent: decision.intent,
+        followUps: hit.followUps,
+        evidenceTier: hit.evidenceTier,
+        model: hit.model,
+        sources: hit.sources,
+        usage: {
+          promptTokens: hit.promptTokens,
+          completionTokens: hit.completionTokens,
+          costUsd: hit.costUsd,
+          cacheHit: true,
+        },
+        retrievalMs: null,
+      });
+      for (const piece of chunkText(hit.text, 48)) sseSend(res, 'delta', { text: piece });
+      sseSend(res, 'sources', { sources: hit.sources, evidenceTier: hit.evidenceTier });
+      sseSend(res, 'usage', {
+        promptTokens: hit.promptTokens,
+        completionTokens: hit.completionTokens,
+        model: hit.model,
+        costUsd: hit.costUsd,
+        cacheHit: true,
+        cacheMatch: looked.match,
+        cacheSimilarity: looked.similarity,
+        kbVersion: store.kbVersion,
+        evidenceTier: hit.evidenceTier,
+        limits: { maxContextTokens: 3000, topK: 6, llmProvider: 'cache' },
+      });
+      sseSend(res, 'done', { messageId: assistantRow.id, followUps: hit.followUps });
+      conversation.updatedAt = new Date();
+      res.end();
+      return;
+    }
+
+    // §5 step 2 — a follow-up is rewritten for retrieval only; the user's own
+    // words remain what is stored and what the answer model sees.
+    const rewrite = decision.retrieve
+      ? await rewriteToStandaloneQuery({
+          provider,
+          question: redacted,
+          history,
+          language: decision.language,
+        })
+      : { query: redacted, method: 'passthrough' as const, reason: 'Retrieval was skipped for this intent.', promptTokens: 0, completionTokens: 0 };
+
+    // §5 steps 3–4 — retrieve (skipped for chitchat/meta/clarify per §9).
+    const retrieval = decision.retrieve
+      ? retrieve(store, rewrite.query, { language: decision.language, intent: decision.intent })
+      : null;
 
     const c = config();
     let composed;
@@ -280,6 +365,28 @@ export function chatRouter(store: Store): Router {
 
     const text = composed.text.length > 0 ? composed.text : '';
 
+    // §6 #14 — knowledge gaps. Recorded only for questions that came back with no
+    // usable evidence, and only in their redacted form. It is the coverage signal a
+    // content manager needs; inventing an analytics number is not.
+    if (
+      composed.evidenceTier === 'NONE' &&
+      decision.retrieve &&
+      !['out_of_scope', 'chitchat', 'meta', 'clarify'].includes(decision.intent)
+    ) {
+      const now = new Date();
+      gapQueries.put(store, {
+        id: crypto.randomUUID(),
+        userId: r.user!.id,
+        conversationId: conversation.id,
+        queryText: redacted.slice(0, 500),
+        language: decision.language,
+        intent: decision.intent,
+        occurredAt: now,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
     if (composed.providerError) {
       // R8: evidence was found but generation could not run. Say so plainly.
       sseSend(res, 'sources', { sources: composed.sources, evidenceTier: composed.evidenceTier });
@@ -305,19 +412,44 @@ export function chatRouter(store: Store): Router {
       sseSend(res, 'delta', { text: piece });
     }
 
+    if (mayUseCache) {
+      storeAnswer({
+        query: redacted,
+        language: decision.language,
+        intent: decision.intent,
+        kbVersion: store.kbVersion,
+        answer: {
+          text,
+          sources: composed.sources,
+          evidenceTier: composed.evidenceTier,
+          followUps: composed.followUps,
+          model: composed.usage.model,
+          promptTokens: composed.usage.promptTokens,
+          completionTokens: composed.usage.completionTokens,
+          costUsd: composed.usage.costUsd,
+        },
+        embedding: looked?.queryEmbedding ?? null,
+      });
+    }
+
     sseSend(res, 'sources', { sources: composed.sources, evidenceTier: composed.evidenceTier });
     sseSend(res, 'usage', {
-      promptTokens: composed.usage.promptTokens,
-      completionTokens: composed.usage.completionTokens,
+      promptTokens: composed.usage.promptTokens + rewrite.promptTokens,
+      completionTokens: composed.usage.completionTokens + rewrite.completionTokens,
       model: composed.usage.model,
+      // null means "this deployment has not configured pricing", which the UI must
+      // render as no cost rather than as free (R10).
       costUsd: composed.usage.costUsd,
       cacheHit: composed.usage.cacheHit,
       evidenceTier: composed.evidenceTier,
+      truncated: composed.truncated,
       contextTokens: retrieval?.contextTokens ?? 0,
       retrievalMs: retrieval?.latencyMs ?? null,
       kbVersion: retrieval?.kbVersion ?? store.kbVersion,
       systemPromptTokens: Math.ceil(SYSTEM_PROMPT.length / 4),
-      limits: { maxContextTokens: 3000, topK: 6, llmProvider: c.LLM_PROVIDER },
+      rewrite: { method: rewrite.method, reason: rewrite.reason },
+      droppedSentences: composed.validation?.removedSentences.length ?? 0,
+      limits: { maxContextTokens: 3000, topK: 6, llmProvider: c.LLM_PROVIDER, cacheTtlSeconds: c.ANSWER_CACHE_TTL_SECONDS },
     });
 
     const followUps =
@@ -345,6 +477,72 @@ export function chatRouter(store: Store): Router {
     res.end();
   });
 
+  /* ------------------------------------------------- answer feedback (§6 #15) */
+
+  /**
+   * Thumbs + reason on an assistant message (§6 #15). Ownership is checked through
+   * the *message* row, so a foreign message id is a 404 rather than a 403 (R9).
+   * Feedback about a wrong answer is the highest-value signal for the golden eval
+   * set, which is why `issueType` is a controlled list rather than free text.
+   */
+  router.post(
+    '/:id/messages/:messageId/feedback',
+    validateParams(z.object({ id: z.string().min(1).max(64), messageId: z.string().min(1).max(64) })),
+    validateBody(recordFeedbackSchema),
+    (req, res) => {
+      const r = req as AuthenticatedRequest;
+      const params = req.params as unknown as { id: string; messageId: string };
+      const conversation = conversations.byIdForUser(store, params.id, r.user!.id);
+      if (!conversation) throw notFound('Conversation');
+      const message = messages
+        .listForConversation(store, conversation.id, r.user!.id)
+        .find((m) => m.id === params.messageId && m.role === 'assistant');
+      if (!message) throw notFound('Message');
+
+      const body = req.body as z.infer<typeof recordFeedbackSchema>;
+      // One row per user per message: a second submission revises the first rather
+      // than inflating the count of complaints.
+      const existing = feedback.forMessage(store, message.id).find((f) => f.userId === r.user!.id);
+      const now = new Date();
+      const row = feedback.put(store, {
+        id: existing?.id ?? crypto.randomUUID(),
+        userId: r.user!.id,
+        messageId: message.id,
+        conversationId: conversation.id,
+        helpful: body.helpful ?? null,
+        rating: body.rating ?? null,
+        issueType: body.issueType ?? null,
+        comment: body.comment ?? null,
+        resolved: false,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      });
+
+      recordAudit(store, {
+        actorUserId: r.user!.id,
+        actorRoles: r.user!.roles,
+        action: AUDIT_ACTIONS.FEEDBACK_RECORDED,
+        entityType: 'message',
+        entityId: message.id,
+        ip: clientIp(req),
+        metadata: { helpful: row.helpful, issueType: row.issueType },
+      });
+
+      res.status(existing ? 200 : 201).json({
+        id: row.id,
+        messageId: row.messageId,
+        helpful: row.helpful,
+        rating: row.rating,
+        issueType: row.issueType,
+        comment: row.comment,
+        createdAt: row.createdAt.toISOString(),
+        // Honest framing: the row is recorded, and whether anyone acts on it is a
+        // team process, not something this API can promise.
+        note: 'Recorded for the knowledge team. It does not change this answer.',
+      });
+    },
+  );
+
   return router;
 }
 
@@ -362,10 +560,11 @@ function recentHistory(
   store: Store,
   conversationId: string,
   userId: string,
+  excludeMessageId?: string,
 ): Array<{ role: 'user' | 'assistant'; content: string }> {
   const rows = messages.listForConversation(store, conversationId, userId);
   return rows
-    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.id !== excludeMessageId)
     .slice(-4)
     .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }));
 }
@@ -384,7 +583,7 @@ interface PersistOpts {
   evidenceTier: MessageRow['evidenceTier'];
   model: string | null;
   sources?: MessageRow['sourcesJson'];
-  usage?: { promptTokens: number; completionTokens: number; costUsd: number; cacheHit: boolean };
+  usage?: { promptTokens: number; completionTokens: number; costUsd: number | null; cacheHit: boolean };
   retrievalMs?: number | null;
   error?: string | null;
 }
@@ -408,6 +607,7 @@ function persistAssistant(
     language: opts.language,
     promptTokens: opts.usage?.promptTokens ?? 0,
     completionTokens: opts.usage?.completionTokens ?? 0,
+    costUsd: opts.usage?.costUsd ?? null,
     model: opts.model,
     cacheHit: opts.usage?.cacheHit ?? false,
     retrievalMs: opts.retrievalMs ?? null,

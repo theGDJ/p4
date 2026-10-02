@@ -44,3 +44,19 @@ export function uwords(alternation: string, flags = 'i'): RegExp {
 export function ustart(alternation: string, flags = 'i'): RegExp {
   return new RegExp(`${UWB_LEFT}(?:${alternation})`, normaliseFlags(flags));
 }
+
+/**
+ * A message that names a standard is self-identifying: the subject of the question is
+ * already fixed, which is the one thing the clarification engine would ask for (§6 #8).
+ *
+ * Two modules need this exact judgement — the router (do not ask for a product when the
+ * IS number is given) and the query rewriter (do not spend a model call resolving
+ * "it" when the standard is already in the text). Keeping the pattern here means the
+ * two can never disagree about what "already specific" means.
+ */
+export const STANDARD_MENTION = /\bIS\s?\d{3,5}\b|\bIS\s?\d{3,5}\s*[:-]\s*\d{4}\b|\bSP\s?\d+\b|\bPart\s\d+\b/iu;
+
+/** True when the text cites an Indian Standard (or a BIS SP / Part number) directly. */
+export function namesStandard(text: string): boolean {
+  return STANDARD_MENTION.test(text);
+}

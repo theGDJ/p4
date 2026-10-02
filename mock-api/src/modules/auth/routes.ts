@@ -169,8 +169,14 @@ export function authRouter(store: Store): Router {
   });
 
   /** Always 202 with an identical body — no account enumeration. */
-  router.post('/password/reset-request', authRateLimit(), validateBody(resetRequestSchema), (req, res) => {
-    const result = requestPasswordReset(store, req.body.email);
+  router.post(
+    '/password/reset-request',
+    authRateLimit(),
+    validateBody(resetRequestSchema),
+    async (req, res) => {
+    // Awaited: the mail is sent before the response, so a 202 here means "accepted
+    // and handed to the transport", never "we hope a background task will manage".
+    const result = await requestPasswordReset(store, req.body.email);
     recordAudit(store, {
       actorUserId: null,
       action: AUDIT_ACTIONS.AUTH_PASSWORD_RESET_REQUESTED,
@@ -185,7 +191,8 @@ export function authRouter(store: Store): Router {
       // insecure settings and this field is never populated there.
       ...(result.devToken ? { devToken: result.devToken } : {}),
     });
-  });
+    },
+  );
 
   router.post('/password/reset', authRateLimit(), validateBody(resetConfirmSchema), async (req, res) => {
     await resetPassword(store, req.body.token, req.body.password);
